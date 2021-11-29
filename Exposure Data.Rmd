@@ -524,10 +524,7 @@ ggplot() +
 
 ```{r}
 library(gridExtra)
-
-
 PrintIndividual(2,patient_exposure_2019,person_list)
 PrintIndividual(10,patient_exposure_2019,person_list)
 PrintIndividual(20,patient_exposure_2019,person_list)
-
 ```
