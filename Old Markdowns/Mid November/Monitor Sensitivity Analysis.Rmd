@@ -1,0 +1,353 @@
+---
+title: "Monitor Sensitivity Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(tidycensus)
+library(ggplot2)
+library(sp)
+library(sf)
+library(tmap)
+library(spdep)
+library(tigris)
+library(openxlsx)
+library(geosphere)
+library(stats)
+
+`%!in%` <- Negate(`%in%`)
+```
+
+```{r}
+census <- read.xlsx("CensusList.xlsx")
+CBSA_census_list <- unique(census$CBSA.Title)
+
+city_list <- c("New York","Los Angeles","Chicago","Dallas","Houston","Washington-Arlington",
+               "Miami-Fort","Philadelphia-Camden","Atlanta","Phoenix","Boston","San Francisco",
+               "Riverside-San","Detroit","Seattle","Minneapolis","San Diego",
+               "Tampa","Denver","St. Louis","Baltimore","Charlotte-Concord","Orlando",
+               "San Antonio","Portland-Vancouver")
+
+ind_collection <- c()
+for (city_name in city_list){
+  ind <- which(lapply(CBSA_census_list, function(x) grep(city_name, x)) == 1)
+  ind_collection <- c(ind_collection, ind)
+}
+
+census <- dplyr::select(filter(census,CBSA.Title %in% CBSA_census_list[ind_collection]),"County/County.Equivalent","State.Name")
+
+countystate <- paste(census[,1],census[,2])
+```
+
+```{r}
+
+pm_2016 <- read.csv("Datasets/daily_88101_2016.csv")
+pm_2017 <- read.csv("Datasets/daily_88101_2017.csv")
+pm_2018 <- read.csv("Datasets/daily_88101_2018.csv")
+pm_2019 <- read.csv("Datasets/daily_88101_2019.csv")
+
+pm_2016_2 <- read.csv("Datasets/daily_88502_2016.csv")
+pm_2017_2 <- read.csv("Datasets/daily_88502_2017.csv")
+pm_2018_2 <- read.csv("Datasets/daily_88502_2018.csv")
+pm_2019_2 <- read.csv("Datasets/daily_88502_2019.csv")
+
+pm_combined <- rbind(pm_2016,pm_2017,pm_2018,pm_2019)
+pm2_combined <- rbind(pm_2016_2,pm_2017_2,pm_2018_2,pm_2019_2)
+
+CleanCombinedData <- function(pm_combined){
+  
+  pm_combined_clean <- pm_combined %>% filter(Observation.Percent >= 50) 
+  
+  CBSA_list <- unique(pm_combined_clean$CBSA.Name)
+  CBSA_ind <- c(19,29,39,47,49,62,77,79,82,86,89,96,114,116,174,179,192,196,227,248,281,316,319,321,342)
+  
+  CBSA_list[CBSA_ind]
+  
+  pm_combined_clean <- mutate(pm_combined_clean, combined_county_state = paste(County.Name, State.Name))
+  
+  pm_combined_clean <- pm_combined_clean %>% filter((combined_county_state %in% countystate) | CBSA.Name %in% CBSA_list[CBSA_ind])
+  
+  pm_combined_clean <- subset(pm_combined_clean, Arithmetic.Mean >= 0 )
+  
+  unique(pm_combined_clean$combined_county_state)[unique(pm_combined_clean$combined_county_state) %!in% countystate]
+  
+  lon_list_ap <- unique(pm_combined_clean$Longitude)
+  lat_list_ap <- unique(pm_combined_clean$Latitude)
+  samdur_list <- unique(pm_combined_clean$Sample.Duration)
+  
+  pm_combined.df <- data.frame()
+  date_list <- seq.Date(as.Date("2016-01-01"),as.Date("2019-12-31"),"day")
+  
+  for (lat_ind in 1:length(lat_list_ap)){
+    working_pm_combined <- filter(pm_combined_clean,Latitude == lat_list_ap[lat_ind])
+    
+    method1 <- filter(working_pm_combined,Sample.Duration == samdur_list[1])
+    method1 <- dplyr::select(method1,Date.Local, Arithmetic.Mean)
+    if (dim(method1)[1]>0){method1 <- aggregate(Arithmetic.Mean ~ Date.Local, method1, mean)}
+    method1 <- as.data.frame(method1) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    method2 <- filter(working_pm_combined,Sample.Duration == samdur_list[2])
+    method2 <- dplyr::select(method2,Date.Local, Arithmetic.Mean)
+    if (dim(method2)[1]>0){method2 <- aggregate(Arithmetic.Mean ~ Date.Local, method2, mean)}
+    method2 <- as.data.frame(method2) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    method3 <- filter(working_pm_combined,Sample.Duration == samdur_list[3])
+    # if (length(unique(method3$POC)) > 1){
+      # print(lat_ind)
+    # }
+    method3 <- dplyr::select(method3,Date.Local, Arithmetic.Mean)
+    if (dim(method3)[1]>0){method3 <- aggregate(Arithmetic.Mean ~ Date.Local, method3, mean)}
+    method3 <- as.data.frame(method3) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    
+    missing_inds <- which(is.na(method3$Arithmetic.Mean))
+    method3$Arithmetic.Mean[missing_inds] <- method2$Arithmetic.Mean[missing_inds]
+  
+    missing_inds <- which(is.na(method3$Arithmetic.Mean))
+    method3$Arithmetic.Mean[missing_inds] <- method1$Arithmetic.Mean[missing_inds]
+    
+    
+    to_add.df <- data.frame(Latitude = lat_list_ap[lat_ind],
+                            Longitude = lon_list_ap[lat_ind],
+                            Date = method3$Date,
+                            armean = method3$Arithmetic.Mean)
+    
+    pm_combined.df <- rbind(pm_combined.df,to_add.df)
+  }
+  return(pm_combined.df)
+}
+
+pm_combined.df <- CleanCombinedData(pm_combined)
+pm2_combined.df <- CleanCombinedData(pm2_combined)
+
+
+# for (i in 1:length(date_list)){
+#   print(sum(pm_combined.df$Date == date_list[i]))
+# }
+# 
+# x <- pm_combined.df
+# for (i in 2:length(pm_combined.df$Date)){
+#   if (pm_combined.df$Date[i-1] == pm_combined.df$Date[i]){
+#     print(pm_combined.df$Latitude[i])
+#     y <- pm_combined.df$Latitude[i]
+#     print(pm_combined.df$Date[i])
+#     break
+#   }
+# }
+# 
+# 
+# which(pm_combined.df$Latitude == y)
+
+lon_list_ap <- unique(pm_combined.df$Longitude)
+lat_list_ap <- unique(pm_combined.df$Latitude)
+
+lon_list2_ap <- unique(pm2_combined.df$Longitude)
+lat_list2_ap <- unique(pm2_combined.df$Latitude)
+
+```
+
+
+```{r, fig.size = 20}
+library(cowplot)
+#Calc correlation between FRM/FEM and non FRM/FEM Air monitors at same locations
+both_lon <- lon_list2_ap[lon_list2_ap %in% lon_list_ap]
+both_lat <- lat_list2_ap[lat_list2_ap %in% lat_list_ap]
+
+pm_combined_both.df <- filter(pm_combined.df, Latitude %in% both_lat)
+pm2_combined_both.df <- filter(pm2_combined.df, Latitude %in% both_lat)
+
+cor(pm_combined_both.df$armean,pm2_combined_both.df$armean,use="p")
+
+x <- cbind(pm_combined_both.df$armean,pm2_combined_both.df$armean)
+
+x <- x[complete.cases(x),]
+
+cor(x)
+
+median_diff <- numeric(length(both_lat))
+num_obs <- numeric(length(both_lat))
+obs_exp_diff <- numeric(length(both_lat))
+cor_vec <- numeric(length(both_lat))
+
+for (both_lat_ind in 1:length(both_lat)){
+  frm <- filter(pm_combined_both.df,Latitude == both_lat[both_lat_ind])$armean
+  nfrm <- filter(pm2_combined_both.df,Latitude == both_lat[both_lat_ind])$armean
+  
+  median_diff[both_lat_ind] <- median(nfrm - frm, na.rm = T)
+  obs_exp_diff[both_lat_ind] <- median((nfrm - frm)/frm, na.rm = T)
+  num_obs[both_lat_ind] <- sum(!is.na(frm) & !is.na(nfrm))
+  cor_vec[both_lat_ind] <- cor(frm,nfrm, use="p")
+}
+
+median_diff <- median_diff[which(num_obs > 100)]
+obs_exp_diff <- obs_exp_diff[which(num_obs > 100)]
+both_lat <- both_lat[which(num_obs > 100)]
+cor_vec <- cor_vec[which(num_obs > 100)]
+num_obs <- num_obs[which(num_obs > 100)]
+
+
+compare_frm.df <- data.frame(MedianDiff = median_diff,
+                             NumOfObs = num_obs,
+                             ObsExp = obs_exp_diff,
+                             Cor = cor_vec,
+                             Lat = as.factor(round(both_lat,3)))
+
+p1 <- ggplot(data = compare_frm.df, aes(x = Lat, y = MedianDiff)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust = .5)) + 
+  labs(y = "Median Diff of FRM vs non-FRM", title = "FRM vs non-FRM") 
+
+p1.5 <- ggplot(data = compare_frm.df, aes(x = Lat, y = Cor)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust = .5)) + 
+  labs(y = "FRM vs non-FRM Correlation", title = "FRM vs non-FRM", x= "") 
+
+p2 <- ggplot(data = compare_frm.df, aes(x = Lat, y = NumOfObs)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust = .5)) + 
+  labs(x = "City (by Lat)", y = "# Shared Observations") 
+
+# grid.arrange(p1,p1.5,p2,ncol = 1)
+
+plot_grid(p1.5,p2,ncol = 1, align = "v")
+ggsave("FRM vs nFRM.png")
+```
+
+```{r}
+GetMonitorPM <- function(lon_list_ap,lat_list_ap,lon,lat, return_mult, radius){
+  combined_lonlat <- cbind(lon_list_ap,lat_list_ap)
+  dist <- apply(combined_lonlat,1,distHaversine,p1 = c(lon,lat)) * .001
+  if (min(dist) > radius){
+    # print("Error: No measurements within radius")
+    return(NA)
+  }
+  if (return_mult){
+    within_rad <- which(dist<radius)
+    return(cbind(lon_list_ap[within_rad],lat_list_ap[within_rad]))
+  } else {
+   return(cbind(lon_list_ap[which.min(dist)],lat_list_ap[which.min(dist)]))
+  }
+}
+
+GetAP <- function(pm_data, lon_list_ap, lat_list_ap, lon, lat, return_mult, radius){
+
+  lonlat <- GetMonitorPM(lon_list_ap,lat_list_ap, lon,lat,return_mult,radius)
+  
+  if (is.na(lonlat[1])){
+    return(NA)
+  }
+  
+  ap_df <- data.frame()
+  
+  for (i in 1:dim(lonlat)[1]){
+    lon_adj <- lonlat[i,1]
+    lat_adj <- lonlat[i,2]
+    
+    dist <- distHaversine(c(lon,lat),c(lon_adj,lat_adj), r=6378137) * 0.001
+    ap_series <- filter(pm_data, Latitude == lat_adj & Longitude == lon_adj)
+    
+    to_add <- dplyr::select(ap_series,armean, Date)
+    to_add$AirMonDist <- dist
+    
+    ap_df <- rbind(ap_df, to_add)
+  }
+  
+  return(ap_df)
+}
+
+InverseWeightedAvg <- function(MultiAM.df){
+  spread_ap <- spread(MultiAM.df,AirMonDist,armean)
+  dist_vec <- as.double(colnames(spread_ap)[2:dim(spread_ap)[2]])
+  inv_weighted_vec <- numeric(dim(spread_ap)[1])
+  for(i in 1:dim(spread_ap)[1]){
+    
+    armeans <- spread_ap[i,2:dim(spread_ap)[2]]
+    
+    if (sum(is.na(armeans)) == 3){
+      inv_weighted_vec[i] <- NA
+    } else {
+      total_dist <- as.integer(!is.na(armeans)) %*% (1/dist_vec)
+      armeans * (1/dist_vec)
+      inv_weighted_armean <- sum((armeans / dist_vec)/total_dist, na.rm = T)
+      
+      inv_weighted_vec[i] <- inv_weighted_armean
+    }
+  }
+  inv_weighted.df <- mutate(dplyr::select(spread_ap,Date),armean = inv_weighted_vec)
+  
+  missing_days <- which(inv_weighted.df$armean == 0)
+  inv_weighted.df$armean[missing_days] <- NA
+  
+  return(inv_weighted.df)
+}
+
+```
+
+```{r}
+
+num_of_points <- 1000
+city_coverage <- numeric(length(city_list))
+
+plot_list <- list()
+
+for (city_ind in 1:length(city_list)){
+# for (city_ind in 1:2){
+  metro <- core_based_statistical_areas(cb = TRUE, year = 2020) %>%
+    filter(str_detect(NAME, city_list[city_ind])) %>%
+    st_transform(8528)
+  
+  random_points <- st_sample(metro, size = num_of_points)
+  random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
+  rcoord <- st_coordinates(random_points_latlon)
+  
+  sim.df <- data.frame()
+  for (i in 1:dim(rcoord)[1]){
+    to_add <- GetAP(pm_combined.df, lon_list_ap, lat_list_ap, rcoord[i,1], rcoord[i,2],F,15)
+    if (!is.na(to_add[[1]][1])){
+      to_add <- InverseWeightedAvg(to_add)
+      to_add$lat <- rcoord[i,2]
+      to_add$lon <- rcoord[i,1]
+      to_add$person <- i
+      sim.df <- rbind(sim.df,to_add)
+    }
+  }
+  
+  person_list <- unique(sim.df$person)
+  
+  city_coverage[[city_ind]] <- length(person_list)/num_of_points * 100
+  
+  plot_list[[city_ind]] <- ggplot() + 
+    geom_sf(data = metro, fill = NA, color = "red") + 
+    geom_sf(data = random_points, color = "red") + 
+    geom_sf(data = random_points[person_list], color = "blue") +
+    ggtitle(city_list[city_ind]) + 
+    theme_void()
+}
+  
+city_coverage.df <- data.frame(Coverage = city_coverage,
+                               City = city_list)
+
+city_coverage.df$City <- factor(city_coverage.df$City, levels = city_coverage.df$City)
+
+ggplot(data = city_coverage.df, aes(x = City, y = Coverage)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1)) + 
+  labs(x = "City", y = "Percent Air Monitor Coverage", title = "Air Monitor Coverage by City") 
+
+for (i in 1:25){
+  print(plot_list[[i]])
+}
+
+```

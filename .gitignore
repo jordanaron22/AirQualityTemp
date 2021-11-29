@@ -6,3 +6,5 @@ Datasets
 netcdf files
 *.html
 *.rda
+*.pdf
+*.pptx

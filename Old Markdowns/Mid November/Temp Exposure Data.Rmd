@@ -1,0 +1,135 @@
+---
+title: "Temp Exposure Data"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(ncdf4) # package for netcdf manipulation
+library(raster) # package for raster manipulation
+library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+library(weathermetrics) #rhum to dew
+
+
+temp_data <- nc_open("tmmx_2016.nc")
+# {
+#     sink('tmmx_2016.txt')
+#  print(nc_data)
+#     sink()
+# }
+
+hum_data <- nc_open("rmax_2016.nc")
+# {
+#     sink('rmax_2016.txt')
+#  print(hum_data)
+#     sink()
+# }
+
+lon_list <- ncvar_get(temp_data, "lon")
+lat_list <- ncvar_get(temp_data, "lat", verbose = F)
+t_list <- ncvar_get(temp_data, "day")
+
+# lon_hum <- ncvar_get(hum_data, "lon")
+# lat_hum <- ncvar_get(hum_data, "lat")
+# t_hum <- ncvar_get(hum_data, "day")
+# 
+# sum(lon_hum != lon_list)
+# sum(lat_hum != lat_list)
+# sum(t_hum != t_list)
+
+temp_array <- ncvar_get(temp_data, "air_temperature")
+hum_array <- ncvar_get(hum_data, "relative_humidity")
+
+fillvalue_temp <- ncatt_get(temp_data, "air_temperature", "_FillValue")
+nc_close(temp_data) 
+temp_array[temp_array == fillvalue_temp$value] <- NA
+
+fillvalue_hum <- ncatt_get(hum_data, "relative_humidity", "_FillValue")
+nc_close(hum_data) 
+hum_array[hum_array == fillvalue_hum$value] <- NA
+
+temp_array <- convert_temperature(temp_array,old_metric = "k", new_metric = "c")
+dew_array <-  humidity.to.dewpoint(hum_array,temp_array,temperature.metric = "celsius")
+
+at_array <- -2.653 + (.994 * temp_array) + (.0153 * dew_array^2)
+
+day <- 1
+
+# temp_slice <- temp_array[,,day]
+# hum_slice <- hum_array[,,day]
+# dew_slice <- dew_array[,,day]
+at_slice <- at_array[,,day]
+
+
+# r <- raster(t(temp_slice), xmn=min(lon_temp), xmx=max(lon_temp), ymn=min(lat_temp), ymx=max(lat_temp), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+# plot(r)
+# 
+# r <- raster(t(hum_slice), xmn=min(lon_temp), xmx=max(lon_temp), ymn=min(lat_temp), ymx=max(lat_temp), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+# plot(r)
+# 
+# r <- raster(t(dew_slice), xmn=min(lon_temp), xmx=max(lon_temp), ymn=min(lat_temp), ymx=max(lat_temp), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+# plot(r)
+
+day <- as.Date("2016-01-01") + day - 1
+
+r <- raster(t(at_slice), xmn=min(lon_list), xmx=max(lon_list), ymn=min(lat_list), ymx=max(lat_list), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+plot(r, 
+     main = paste0("Apparent Temp on ",format(day, format="%B %d %Y")),
+     xlab = "Longitude",
+     ylab = "Latitude")
+
+```
+
+
+
+````{r}
+rm(temp_array)
+rm(dew_array)
+rm(hum_array)
+gc()
+r_brick <- brick(at_array, xmn=min(lat_list), xmx=max(lat_list), ymn=min(lon_list), ymx=max(lon_list), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+
+# r_brick <- flip(t(r_brick), direction='y')
+r_brick <- t(r_brick)
+
+GrabAT <- function(r_brick, lon_list, lat_list, lon, lat){
+  
+  lon_adj <- lon_list[which(abs(lon_list-lon)==min(abs(lon_list-lon)))]
+  lat_adj <- lat_list[which(abs(lat_list-lat)==min(abs(lat_list-lat)))]
+  
+  at_series <- extract(r_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple')
+  
+  at_temp_df <- data.frame(day = seq(as.Date("2016-01-01"),as.Date("2016-12-31"), by = "day"),
+                           temp = c(at_series))
+  
+  return(at_temp_df)
+}
+```
+
+```{r}
+miami_lon <- -80.1918
+miami_lat <- 25.7617
+
+mpls_lon <- -93.2650
+mpls_lat <- 44.9778
+
+
+
+at_df1 <- GrabAT(r_brick, lon_list, lat_list,miami_lon,miami_lat)
+at_df2 <- GrabAT(r_brick, lon_list, lat_list,mpls_lat,mpls_lat)
+
+
+
+ggplot() +
+  geom_line(data=at_df1, aes(x=day, y=temp, color="Miami")) + 
+  geom_line(data=at_df2, aes(x=day, y=temp, color="Minneapolis ")) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Apparent Temp (C)", title = "Daily AT Highs in 2016")
+
+```

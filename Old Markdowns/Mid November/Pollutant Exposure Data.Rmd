@@ -1,0 +1,417 @@
+---
+title: "Pollutant Exposure Data"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(sp)
+library(geosphere)
+library(openxlsx)
+
+`%!in%` <- Negate(`%in%`)
+```
+
+```{r}
+census <- read.xlsx("CensusList.xlsx")
+CBSA_census_list <- unique(census$CBSA.Title)
+
+city_list <- c("New York","Los Angeles","Chicago","Dallas","Houston","Washington-Arlington",
+               "Miami-Fort","Philadelphia-Camden","Atlanta","Phoenix","Boston","San Francisco",
+               "Riverside-San","Detroit","Seattle","Minneapolis","San Diego",
+               "Tampa","Denver","St. Louis","Baltimore","Charlotte-Concord","Orlando",
+               "San Antonio","Portland-Vancouver")
+
+ind_collection <- c()
+for (city_name in city_list){
+  ind <- which(lapply(CBSA_census_list, function(x) grep(city_name, x)) == 1)
+  ind_collection <- c(ind_collection, ind)
+}
+
+census <- select(filter(census,CBSA.Title %in% CBSA_census_list[ind_collection]),"County/County.Equivalent","State.Name")
+
+countystate <- paste(census[,1],census[,2])
+```
+
+```{r}
+
+pm_2016 <- read.csv("daily_88101_2016.csv")
+year <- 2016
+
+# county_list <- read.xlsx("CountyList.xlsx")
+# combined_county_list <- paste(county_list[,1],county_list[,2])
+
+pm_2016_clean <- pm_2016 %>% filter(Observation.Percent >= 50) 
+
+CBSA_list <- unique(pm_2016_clean$CBSA.Name)
+CBSA_ind <- c(19,29,39,47,49,62,77,79,82,86,89,96,114,116,174,179,192,196,227,248,281,316,319,321,342)
+
+CBSA_list[CBSA_ind]
+
+pm_2016_clean <- mutate(pm_2016_clean, combined_county_state = paste(County.Name, State.Name))
+
+pm_2016_clean <- pm_2016_clean %>% filter((combined_county_state %in% countystate) | CBSA.Name %in% CBSA_list[CBSA_ind])
+
+
+# pm_2016_clean <- pm_2016_clean %>% filter( CBSA.Name %in% CBSA_list[CBSA_ind])
+
+unique(pm_2016_clean$combined_county_state)[unique(pm_2016_clean$combined_county_state) %!in% countystate]
+
+lon_list <- unique(pm_2016_clean$Longitude)
+lat_list <- unique(pm_2016_clean$Latitude)
+samdur_list <- unique(pm_2016_clean$Sample.Duration)
+
+pm_2016.df <- data.frame()
+date_list <- seq.Date(as.Date(paste0(year,"-01-01")),as.Date(paste0(year,"-12-31")),"day")
+
+for (lat_ind in 1:length(lat_list)){
+  working_pm_2016 <- filter(pm_2016_clean,Latitude == lat_list[lat_ind])
+  
+  method1 <- filter(working_pm_2016,Sample.Duration == samdur_list[1])
+  method1 <- select(method1,Date.Local, Arithmetic.Mean)
+  method1 <- as.data.frame(method1) %>% 
+    mutate(Date = as.Date(Date.Local)) %>%
+    complete(Date = date_list)
+  
+  method2 <- filter(working_pm_2016,Sample.Duration == samdur_list[2])
+  method2 <- select(method2,Date.Local, Arithmetic.Mean)
+  method2 <- as.data.frame(method2) %>% 
+    mutate(Date = as.Date(Date.Local)) %>%
+    complete(Date = date_list)
+  
+  method3 <- filter(working_pm_2016,Sample.Duration == samdur_list[3])
+  method3 <- select(method3,Date.Local, Arithmetic.Mean)
+  method3 <- as.data.frame(method3) %>% 
+    mutate(Date = as.Date(Date.Local)) %>%
+    complete(Date = date_list)
+  
+  
+  missing_inds <- which(is.na(method3$Arithmetic.Mean))
+  method3$Arithmetic.Mean[missing_inds] <- method2$Arithmetic.Mean[missing_inds]
+
+  missing_inds <- which(is.na(method3$Arithmetic.Mean))
+  method3$Arithmetic.Mean[missing_inds] <- method1$Arithmetic.Mean[missing_inds]
+  
+  
+  to_add.df <- data.frame(Latitude = lat_list[lat_ind],
+                          Longitude = lon_list[lat_ind],
+                          Date = method3$Date,
+                          armean = method3$Arithmetic.Mean)
+  
+  pm_2016.df <- rbind(pm_2016.df,to_add.df)
+}
+
+
+# for (i in 1:length(date_list)){
+#   print(sum(pm_2016.df$Date == date_list[i]))
+# }
+# 
+# x <- pm_2016.df
+# for (i in 2:length(pm_2016.df$Date)){
+#   if (pm_2016.df$Date[i-1] == pm_2016.df$Date[i]){
+#     print(pm_2016.df$Latitude[i])
+#     y <- pm_2016.df$Latitude[i]
+#     print(pm_2016.df$Date[i])
+#     break
+#   }
+# }
+# 
+# 
+# which(pm_2016.df$Latitude == y)
+
+
+```
+
+
+```{r}
+lon_list <- unique(pm_2016.df$Longitude)
+lat_list <- unique(pm_2016.df$Latitude)
+
+
+la_lon <- -118.239390
+la_lat <- 33.950949
+
+det_lon <- -83.0458
+det_lat <- 42.3314
+
+distHaversine(c(la_lon,la_lat),c(det_lon,det_lat), r=6378137) * 0.001
+
+GetMonitorPM <- function(lon_list,lat_list,lon,lat, return_mult, radius){
+  combined_lonlat <- cbind(lon_list,lat_list)
+  dist <- apply(combined_lonlat,1,distHaversine,p1 = c(lon,lat)) * .001
+  if (min(dist) > radius){
+    # print("Error: No measurements within radius")
+    return(NA)
+  }
+  if (return_mult){
+    within_rad <- which(dist<radius)
+    return(cbind(lon_list[within_rad],lat_list[within_rad]))
+  } else {
+   return(cbind(lon_list[which.min(dist)],lat_list[which.min(dist)]))
+  }
+}
+
+GetMonitorPM(lon_list,lat_list,la_lon,la_lat,F,8)
+which.min(abs(lon_list-la_lon) + (abs(lat_list-la_lat)))
+
+GetAP <- function(pm_data, lon_list, lat_list, lon, lat, return_mult, radius){
+
+  lonlat <- GetMonitorPM(lon_list,lat_list, lon,lat,return_mult,radius)
+  
+  if (is.na(lonlat[1])){
+    return(NA)
+  }
+  
+  ap_df <- data.frame()
+  
+  for (i in 1:dim(lonlat)[1]){
+    lon_adj <- lonlat[i,1]
+    lat_adj <- lonlat[i,2]
+    
+    dist <- distHaversine(c(lon,lat),c(lon_adj,lat_adj), r=6378137) * 0.001
+    ap_series <- filter(pm_data, Latitude == lat_adj & Longitude == lon_adj)
+    
+    to_add <- select(ap_series,armean, Date)
+    to_add$AirMonDist <- dist
+    
+    ap_df <- rbind(ap_df, to_add)
+  }
+  
+  return(ap_df)
+}
+
+
+la_ap <- GetAP(pm_2016.df, lon_list, lat_list, la_lon, la_lat,F,10)
+det_ap <- GetAP(pm_2016.df, lon_list, lat_list, det_lon, det_lat,F,10)
+
+ggplot() +
+  geom_point(data=la_ap, aes(x=as.Date(Date), y=armean, color="LA ")) + 
+  geom_point(data=det_ap, aes(x=as.Date(Date), y=armean, color="Detroit")) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in 2016")
+
+```
+
+```{r}
+
+MultiAM.df <- GetAP(pm_2016.df, lon_list, lat_list, la_lon, la_lat,T,11)
+
+ggplot() +
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,2)))) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in LA 2016",color = "Distance")
+
+plot(filter(MultiAM.df,AirMonDist < 7)$armean - filter(MultiAM.df,AirMonDist > 7)$armean,
+     xlab = "Day",
+     ylab = "Difference Between Monitors",
+     main = "Air Monitor Residuals")
+
+
+InverseWeightedAvg <- function(MultiAM.df){
+  spread_ap <- spread(MultiAM.df,AirMonDist,armean)
+  dist_vec <- as.double(colnames(spread_ap)[2:dim(spread_ap)[2]])
+  inv_weighted_vec <- numeric(dim(spread_ap)[1])
+  for(i in 1:dim(spread_ap)[1]){
+    
+    armeans <- spread_ap[i,2:dim(spread_ap)[2]]
+    
+    if (sum(is.na(armeans)) == 3){
+      inv_weighted_vec[i] <- NA
+    } else {
+      total_dist <- as.integer(!is.na(armeans)) %*% (1/dist_vec)
+      armeans * (1/dist_vec)
+      inv_weighted_armean <- sum((armeans / dist_vec)/total_dist, na.rm = T)
+      
+      inv_weighted_vec[i] <- inv_weighted_armean
+    }
+  }
+  inv_weighted.df <- mutate(select(spread_ap,Date),armean = inv_weighted_vec)
+  
+  missing_days <- which(inv_weighted.df$armean == 0)
+  inv_weighted.df$armean[missing_days] <- NA
+  
+  return(inv_weighted.df)
+}
+
+inv_weighted.df <- InverseWeightedAvg(MultiAM.df)
+  
+ggplot() +
+  geom_point(data=inv_weighted.df, aes(x=as.Date(Date), y=armean), shape = 0) +  
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,3)))) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in LA 2016", color = "Distance")
+
+ggplot() +
+  geom_point(data=inv_weighted.df, aes(x=as.Date(Date), y=armean), shape = 0) +  
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,3)))) + 
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b",
+               limits = as.Date(c('2016-06-01','2016-7-01'))) +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in LA June 2016", color = "Distance")
+
+```
+
+```{r}
+
+MultiAM.df <- GetAP(pm_2016.df, lon_list, lat_list, det_lon, det_lat,T,5.5)
+
+ggplot() +
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,2)))) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in Detroit 2016",color = "Distance")
+
+plot(filter(MultiAM.df,AirMonDist < 5)$armean - filter(MultiAM.df,AirMonDist > 5)$armean,
+     xlab = "Day",
+     ylab = "Difference Between Monitors",
+     main = "Air Monitor Residuals")
+
+
+InverseWeightedAvg <- function(MultiAM.df){
+  spread_ap <- spread(MultiAM.df,AirMonDist,armean)
+  dist_vec <- as.double(colnames(spread_ap)[2:dim(spread_ap)[2]])
+  inv_weighted_vec <- numeric(dim(spread_ap)[1])
+  for(i in 1:dim(spread_ap)[1]){
+    
+    armeans <- spread_ap[i,2:dim(spread_ap)[2]]
+    
+    if (sum(is.na(armeans)) == 3){
+      inv_weighted_vec[i] <- NA
+    } else {
+      total_dist <- as.integer(!is.na(armeans)) %*% (1/dist_vec)
+      armeans * (1/dist_vec)
+      inv_weighted_armean <- sum((armeans / dist_vec)/total_dist, na.rm = T)
+      
+      inv_weighted_vec[i] <- inv_weighted_armean
+    }
+  }
+  inv_weighted.df <- mutate(select(spread_ap,Date),armean = inv_weighted_vec)
+  
+  missing_days <- which(inv_weighted.df$armean == 0)
+  inv_weighted.df$armean[missing_days] <- NA
+  
+  return(inv_weighted.df)
+}
+
+inv_weighted.df <- InverseWeightedAvg(MultiAM.df)
+  
+ggplot() +
+  geom_point(data=inv_weighted.df, aes(x=as.Date(Date), y=armean), shape = 0) +  
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,3)))) + 
+  scale_x_date(date_breaks = "3 month", date_labels =  "%b") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in Detroit 2016", color = "Distance")
+
+ggplot() +
+  geom_point(data=inv_weighted.df, aes(x=as.Date(Date), y=armean), shape = 0) +  
+  geom_point(data=MultiAM.df, aes(x=as.Date(Date), y=armean, color=factor(round(AirMonDist,3)))) + 
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b",
+               limits = as.Date(c('2016-06-01','2016-7-01'))) +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in Detroit June 2016", color = "Distance")
+
+```
+
+```{r}
+filter(pm_2016, State.Code == 4, County.Code == 21, Site.Num == 3015, Sample.Duration == "24 HOUR", Date.Local == "2016-01-31")
+```
+
+
+
+```{r}
+library(sf)
+library(sp)
+library(tmap)
+library(spdep)
+library(tigris)
+library(dplyr)
+library(tidyverse)
+library(tidycensus)
+
+set.seed(10)
+
+metros <-  get_acs(
+  geography = "cbsa",
+  variables = "DP03_0021P",
+  summary_var = "B01003_001",
+  survey = "acs1",
+  year = 2019
+) %>%
+  slice_max(summary_est, n = 20)
+
+mn_tracts <- map_dfr(c("MD"), ~{
+  tracts(.x, cb = TRUE, year = 2020)
+}) %>%
+  st_transform(8528)
+
+mn_metro <- core_based_statistical_areas(cb = TRUE, year = 2020) %>%
+  filter(str_detect(NAME, "Baltimore")) %>%
+  st_transform(8528)
+
+mn_tracts_within <- mn_tracts %>%
+  st_filter(mn_metro, .predicate = st_within)
+
+random_points <- st_sample(mn_metro, size = 100)
+
+ggplot() + 
+  geom_sf(data = mn_tracts_within, fill = "white", color = "grey") + 
+  geom_sf(data = mn_metro, fill = NA, color = "red") + 
+  geom_sf(data = random_points, color = "blue") + 
+  theme_void()
+
+
+random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
+rcoord <- st_coordinates(random_points_latlon)
+
+sim.df <- data.frame()
+for (i in 1:dim(rcoord)[1]){
+  
+  to_add <- GetAP(pm_2016.df, lon_list, lat_list, rcoord[i,1], rcoord[i,2],T,15)
+  if (!is.na(to_add[[1]][1])){
+    to_add <- InverseWeightedAvg(to_add)
+    to_add$lat <- rcoord[i,2]
+    to_add$lon <- rcoord[i,1]
+    to_add$person <- i
+    sim.df <- rbind(sim.df,to_add)
+  }
+}
+
+person_list <- unique(sim.df$person)
+rdates <- sample(seq(as.Date('2016/01/11'), as.Date('2016/12/31'), by="day"), length(person_list))
+
+ggplot() + 
+  geom_sf(data = mn_tracts_within, fill = "white", color = "grey") + 
+  geom_sf(data = mn_metro, fill = NA, color = "red") + 
+  geom_sf(data = random_points[person_list], color = "blue") + 
+  theme_void()
+
+environmental_exp <- data.frame()
+for (i in 1:length(rdates)){
+  working_sim.df <- filter(sim.df, person == person_list[i])
+  death_date <- rdates[i]
+  lag_dates <- seq(death_date-10,death_date, by = "day")
+  pollution_exposure <-filter(working_sim.df, Date %in% lag_dates)
+  
+  # temp_exposure <- GrabAT(r_brick, lon_list, lat_list,pollution_exposure$lon[1],pollution_exposure$lat[1])
+  # temp_exposure <- filter(temp_exposure, day %in% lag_dates)
+  # 
+  # environmental_exp_working <- dplyr::select(pollution_exposure,Date,armean, person)
+  # environmental_exp_working$temp <- temp_exposure$temp
+  # 
+  # environmental_exp <- rbind (environmental_exp,environmental_exp_working)
+}
+
+```
+
+
