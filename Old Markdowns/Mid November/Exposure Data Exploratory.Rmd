@@ -363,12 +363,12 @@ temp_data <- nc_open("tmmx_2016.nc")
 #     sink()
 # }
 
-hum_data <- nc_open("rmax_2016.nc")
-# {
-#     sink('rmax_2016.txt')
-#  print(hum_data)
-#     sink()
-# }
+hum_data <- nc_open("../../netcdf files/rmin_2019.nc")
+{
+    sink('rmin_2019.txt')
+ print(hum_data)
+    sink()
+}
 
 lon_list_temp <- ncvar_get(temp_data, "lon")
 lat_list_temp <- ncvar_get(temp_data, "lat", verbose = F)

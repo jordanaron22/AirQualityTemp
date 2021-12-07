@@ -467,25 +467,25 @@ GetAirMonDen <- function(pm_combined.df, lon_list_ap,lat_list_ap,city_list,num_o
   
 }
 
-# o3_den <- GetAirMonDen(o3_combined.df,lon_list_o3,lat_list_o3,city_list,1000,"O3")
-frm_den <- GetAirMonDen(pm_frm.df,lon_list_ap,lat_list_ap,city_list,3000,"FRM")
+o3_den <- GetAirMonDen(o3_combined.df,lon_list_o3,lat_list_o3,city_list,3000,"O3")
+# frm_den <- GetAirMonDen(pm_frm.df,lon_list_ap,lat_list_ap,city_list,3000,"FRM")
 frm_nfrm_den <- GetAirMonDen(pm_frm_nfrm.df,lon_list2_ap,lat_list2_ap,city_list,3000,"FRM and nFRM")
 
 
-# plot_list <- o3_den[[1]]
-plot_list <- frm_den[[1]]
+plot_list <- o3_den[[1]]
+# plot_list <- frm_den[[1]]
 plot_list2 <- frm_nfrm_den[[1]]
 
 
-# o3_coverage.df <- o3_den[[2]]
-frm_coverage.df <- frm_den[[2]]
+o3_coverage.df <- o3_den[[2]]
+# frm_coverage.df <- frm_den[[2]]
 frm_nfrm_coverage.df <- frm_nfrm_den[[2]]
 
-# coverage.df <- rbind(o3_coverage.df,frm_nfrm_coverage.df)
-# coverage.df$Pollutant <- c(rep("Ozone",25),rep("PM2.5 (FRM/nFRM)",25))
+coverage.df <- rbind(o3_coverage.df,frm_nfrm_coverage.df)
+coverage.df$Pollutant <- c(rep("Ozone",25),rep("PM2.5 (FRM/nFRM)",25))
 
-coverage.df <- rbind(frm_coverage.df,frm_nfrm_coverage.df)
-coverage.df$Pollutant <- c(rep("PM2.5 (FRM)",25),rep("PM2.5 (FRM/nFRM)",25))
+# coverage.df <- rbind(frm_coverage.df,frm_nfrm_coverage.df)
+# coverage.df$Pollutant <- c(rep("PM2.5 (FRM)",25),rep("PM2.5 (FRM/nFRM)",25))
 
 
 ggplot(coverage.df, aes(x = City, y= Coverage, fill = Pollutant)) +
