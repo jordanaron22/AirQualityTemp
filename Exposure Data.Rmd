@@ -165,18 +165,21 @@ InverseWeightedAvg <- function(MultiAM.df){
   return(inv_weighted.df)
 }
 
-GrabAT <- function(r_brick, lon_list_temp, lat_list_temp, lon, lat,year){
+GrabAT <- function(temp_brick,hum_brick, lon_list_temp, lat_list_temp, lon, lat,year){
   
   lon_adj <- lon_list_temp[which(abs(lon_list_temp-lon)==min(abs(lon_list_temp-lon)))]
   lat_adj <- lat_list_temp[which(abs(lat_list_temp-lat)==min(abs(lat_list_temp-lat)))]
   
-  at_series <- extract(r_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple')
+  hum_series <- extract(hum_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple')
+  temp_series <- extract(temp_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple')
   
   start_date <- as.Date(paste0(year,"-01-01")) - 10
   end_date <- as.Date(paste0(year,"-12-31"))
   
+  heat_ind <- heat.index(t = c(temp_series), rh = c(hum_series), temperature.metric = "celsius")
+  
   at_temp_df <- data.frame(day = seq(start_date,end_date, by = "day"),
-                           temp = c(at_series))
+                           heat = heat_ind)
   
   return(at_temp_df)
 }
@@ -268,21 +271,36 @@ loadRData <- function(fileName){
 
 GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp){
   
-  file_name <- paste0("at_array_",year,".rda")
-  at_array <- loadRData(file_name)
+  file_name <- paste0("hum_array_",year,".rda")
+  hum_array <- loadRData(file_name)
 
-  r_brick <- brick(at_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+  hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
                    ymn=min(lon_list_temp), ymx=max(lon_list_temp),
                    crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
-  r_brick <- t(r_brick)
+  hum_brick <- t(hum_brick)
+  rm(hum_array)
+  gc()
+  
+  file_name <- paste0("temp_array_",year,".rda")
+  temp_array <- loadRData(file_name)
+  
+  temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  temp_brick <- t(temp_brick)
+  rm(temp_array)
+  gc()
+  
+  
+  ####################START FROM HERE TOMORROW
   
   patient_exposure <- data.frame()
   for (i in 1:dim(patient.df)[1]){
     
     monitor_exposure <- GetAP(pm_combined.df, lon_list_ap, lat_list_ap,
-                              patient.df$Longitude[i], patient.df$Latitude[i],T,15)
+                              patient.df$Longitude[i], patient.df$Latitude[i],T,20)
     o3_exposure <- GetAP(o3_combined.df, lon_list_o3,lat_list_o3,
-                         patient.df$Longitude[i], patient.df$Latitude[i],T,15)
+                         patient.df$Longitude[i], patient.df$Latitude[i],T,20)
     
     if (!is.na(monitor_exposure[[1]][1])){
       lag_dates <- seq(patient.df$Date[i] - 10,patient.df$Date[i],by="day")
@@ -296,17 +314,17 @@ GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_li
       if (!is.na(o3_exposure[[1]][1])){
         o3_exposure <- filter(o3_exposure, Date %in% lag_dates)
         o3_exposure <- InverseWeightedAvg(o3_exposure)
-        monitor_exposure$o3 <- o3_exposure$armean
+        monitor_exposure$o3 <- o3_exposure$armean * 1000
       } else {
         monitor_exposure$o3 <- NA
       }
       
-      temp_exposure <- GrabAT(r_brick, lon_list_temp,lat_list_temp,
+      temp_exposure <- GrabAT(temp_brick, hum_brick,lon_list_temp,lat_list_temp,
                               patient.df$Longitude[i],patient.df$Latitude[i],year)
       temp_exposure <- filter(temp_exposure, day %in% lag_dates)
     
       environmental_exp_working <- dplyr::select(monitor_exposure,Date,armean,o3,person)
-      environmental_exp_working$temp <- temp_exposure$temp
+      environmental_exp_working$temp <- temp_exposure$heat
       
       patient_exposure <- rbind(patient_exposure,environmental_exp_working)
     }
@@ -315,7 +333,7 @@ GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_li
   return(patient_exposure)
 }
 
-PrintIndividual <- function(individual, environmental_exp,person_list){
+PrintIndividual <- function(individual, environmental_exp,person_list,year){
 
 
   environmental_exp_filt <- filter(environmental_exp, person == person_list[individual])
@@ -324,18 +342,18 @@ PrintIndividual <- function(individual, environmental_exp,person_list){
     geom_line(data=environmental_exp_filt, aes(x=Date, y=temp)) +
     # scale_x_date(date_breaks = "d", date_labels =  "%d") +
     # theme(axis.text.x=element_text(angle=60, hjust=1)) +
-    labs(x = "Month", y = "Apparent Temp (C)", title = "Daily AT Highs in 2016")
+    labs(x = "Month", y = "Apparent Temp (C)", title = paste0("Daily AT Highs in ",year))
   
   
   g <- ggplot() +
     geom_line(data=environmental_exp_filt, aes(x=Date, y=armean)) + 
     # theme(axis.text.x=element_text(angle=60, hjust=1)) +
-    labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = "Arithmetic Mean PM2.5 (µg/m³) in 2016")
+    labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = paste0("Arithmetic Mean PM2.5 (µg/m³) in ",year))
   
   g2 <- ggplot() +
     geom_line(data=environmental_exp_filt, aes(x=Date, y=o3)) + 
     # theme(axis.text.x=element_text(angle=60, hjust=1)) +
-    labs(x = "Month", y = "Arithmetic Mean Ozone", title = "Arithmetic Mean Ozone in 2016")
+    labs(x = "Month", y = "Arithmetic Mean Ozone", title = paste0("Max Daily 8hr Mean Ozone ",year))
   
   m <- ggplot() + 
     geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
@@ -444,29 +462,47 @@ library(abind)
 
 # temp_array_2016 <- GetTempArray("2016")
 # hum_array_2016 <- GetHumArray("2016")
-# at_array_2016 <- GetATArray(temp_array_2016,hum_array_2016)
-# save(at_array_2016, file = "at_array_2016.rda")
-# at_array_end_2016 <- at_array_2016[,,357:366]
-# 
+# temp_array_end_2016 <- temp_array_2016[,,357:366]
+# hum_array_end_2016 <- hum_array_2016[,,357:366]
+# save(temp_array_2016, file = "temp_array_2016.rda")
+# save(hum_array_2016, file = "hum_array_2016.rda")
+# rm(temp_array_2016)
+# rm(hum_array_2016)
+# gc()
+# # 
 # temp_array_2017 <- GetTempArray("2017")
 # hum_array_2017 <- GetHumArray("2017")
-# at_array_2017 <- GetATArray(temp_array_2017,hum_array_2017)
-# at_array_end_2017 <- at_array_2017[,,356:365]
-# at_array_2017 <- abind(at_array_end_2016,at_array_2017,along = 3)
-# save(at_array_2017, file = "at_array_2017.rda")
-# 
+# temp_array_end_2017 <- temp_array_2017[,,356:365]
+# hum_array_end_2017 <- hum_array_2017[,,356:365]
+# temp_array_2017 <- abind(temp_array_end_2016,temp_array_2017,along = 3)
+# hum_array_2017 <- abind(hum_array_end_2016,hum_array_2017,along = 3)
+# save(temp_array_2017, file = "temp_array_2017.rda")
+# save(hum_array_2017, file = "hum_array_2017.rda")
+# rm(temp_array_2017)
+# rm(hum_array_2017)
+# gc()
+# # 
 # temp_array_2018 <- GetTempArray("2018")
 # hum_array_2018 <- GetHumArray("2018")
-# at_array_2018 <- GetATArray(temp_array_2018,hum_array_2018)
-# at_array_end_2018 <- at_array_2018[,,356:365]
-# at_array_2018 <- abind(at_array_end_2017,at_array_2018,along = 3)
-# save(at_array_2018, file = "at_array_2018.rda")
-# 
+# temp_array_end_2018 <- temp_array_2018[,,356:365]
+# hum_array_end_2018 <- hum_array_2018[,,356:365]
+# temp_array_2018 <- abind(temp_array_end_2017,temp_array_2018,along = 3)
+# hum_array_2018 <- abind(hum_array_end_2017,hum_array_2018,along = 3)
+# save(temp_array_2018, file = "temp_array_2018.rda")
+# save(hum_array_2018, file = "hum_array_2018.rda")
+# rm(temp_array_2018)
+# rm(hum_array_2018)
+# gc()
+# # 
 # temp_array_2019 <- GetTempArray("2019")
 # hum_array_2019 <- GetHumArray("2019")
-# at_array_2019 <- GetATArray(temp_array_2019,hum_array_2019)
-# at_array_2019 <- abind(at_array_end_2018,at_array_2019,along = 3)
-# save(at_array_2019, file = "at_array_2019.rda")
+# temp_array_2019 <- abind(temp_array_end_2018,temp_array_2019,along = 3)
+# hum_array_2019 <- abind(hum_array_end_2018,hum_array_2019,along = 3)
+# save(temp_array_2019, file = "temp_array_2019.rda")
+# save(hum_array_2019, file = "hum_array_2019.rda")
+# rm(temp_array_2019)
+# rm(hum_array_2019)
+# gc()
 
 templatlon <- GetTempLatLon(2019)
 lon_list_temp <- templatlon[[1]]
@@ -479,7 +515,7 @@ gc()
 
 ```{r}
 
-spatial_metro_list <- SimulateMetroData(c("MD"),"Baltimore")
+spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles")
 
 metro_tracts_within <- spatial_metro_list[[1]]
 metro <- spatial_metro_list[[2]]
@@ -524,7 +560,6 @@ ggplot() +
 
 ```{r}
 library(gridExtra)
-PrintIndividual(2,patient_exposure_2019,person_list)
-PrintIndividual(10,patient_exposure_2019,person_list)
-PrintIndividual(20,patient_exposure_2019,person_list)
+PrintIndividual(3,patient_exposure_2019,person_list,2019)
+PrintIndividual(30,patient_exposure_2019,person_list,2019)
 ```
