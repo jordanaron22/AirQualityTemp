@@ -24,6 +24,7 @@ library(tigris)
 library(dplyr)
 library(tidyverse)
 library(tidycensus)
+library(lubridate)
 
 set.seed(10)
 
@@ -184,7 +185,7 @@ GrabAT <- function(temp_brick,hum_brick, lon_list_temp, lat_list_temp, lon, lat,
   return(at_temp_df)
 }
 
-SimulateMetroData <- function(States,City){
+SimulateMetroData <- function(States,City,samp_size){
 
   metro_tracts <- map_dfr(States, ~{
     tracts(.x, cb = TRUE, year = 2020)
@@ -198,7 +199,7 @@ SimulateMetroData <- function(States,City){
   metro_tracts_within <- metro_tracts %>%
     st_filter(metro, .predicate = st_within)
   
-  random_points <- st_sample(metro, size = 100)
+  random_points <- st_sample(metro, size = samp_size)
   return(list(metro_tracts_within,metro,random_points))
 }
 
@@ -269,6 +270,55 @@ loadRData <- function(fileName){
     get(ls()[ls() != "fileName"])
 }
 
+GetTimeStratDays <- function(patient_date){
+  date_set <- c(patient_date)
+  event <- c(1)
+  
+  #Looking back
+  if (month(patient_date - 7) == month(patient_date)){
+    date_set <- c(patient_date - 7, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 14) == month(patient_date)){
+    date_set <- c(patient_date - 14, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 21) == month(patient_date)){
+    date_set <- c(patient_date - 21, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 28) == month(patient_date)){
+    date_set <- c(patient_date - 28, date_set)
+    event <- c(0,event)
+  }
+  
+  #Looking forward
+  if (month(patient_date + 7) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 7)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 14) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 14)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 21) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 21)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 28) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 28)
+    event <- c(event,0)
+  }
+  
+  return(list(date_set,event))
+}
+
+
+pm_combined.df <- pm_frm_nfrm.df
+year <- 2019
+lon_list_ap <- lon_list2_ap
+lat_list_ap <- lat_list2_ap
+
 GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp){
   
   file_name <- paste0("hum_array_",year,".rda")
@@ -292,9 +342,8 @@ GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_li
   gc()
   
   
-  ####################START FROM HERE TOMORROW
-  
   patient_exposure <- data.frame()
+  max_lag <- 4
   for (i in 1:dim(patient.df)[1]){
     
     monitor_exposure <- GetAP(pm_combined.df, lon_list_ap, lat_list_ap,
@@ -302,29 +351,49 @@ GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_li
     o3_exposure <- GetAP(o3_combined.df, lon_list_o3,lat_list_o3,
                          patient.df$Longitude[i], patient.df$Latitude[i],T,20)
     
-    if (!is.na(monitor_exposure[[1]][1])){
-      lag_dates <- seq(patient.df$Date[i] - 10,patient.df$Date[i],by="day")
+    date_list <- GetTimeStratDays(patient.df$Date[i])
+    date_set <- date_list[[1]]
+    event_set <- date_list[[2]]
+    date_set_max_lag <- date_set - max_lag
+    lag_date_set <- as.Date(mapply(seq,date_set_max_lag,date_set,by="day"))
+    
+    if (!is.na(monitor_exposure[[1]][1]) | !is.na(o3_exposure[[1]][1])){
       
-      monitor_exposure <- filter(monitor_exposure, Date %in% lag_dates)
-      monitor_exposure <- InverseWeightedAvg(monitor_exposure)
-      monitor_exposure$lon <- patient.df$Longitude[i]
-      monitor_exposure$lat <- patient.df$Latitude[i]
-      monitor_exposure$person <- i
-      
-      if (!is.na(o3_exposure[[1]][1])){
-        o3_exposure <- filter(o3_exposure, Date %in% lag_dates)
-        o3_exposure <- InverseWeightedAvg(o3_exposure)
-        monitor_exposure$o3 <- o3_exposure$armean * 1000
+      if (!is.na(monitor_exposure[[1]][1])){
+        monitor_exposure <- filter(monitor_exposure, Date %in% lag_date_set)
+        monitor_exposure <- InverseWeightedAvg(monitor_exposure)
+        monitor_exposure$lon <- patient.df$Longitude[i]
+        monitor_exposure$lat <- patient.df$Latitude[i]
+        monitor_exposure$person <- i
+        
+        if (!is.na(o3_exposure[[1]][1])){
+          o3_exposure <- filter(o3_exposure, Date %in% lag_date_set)
+          o3_exposure <- InverseWeightedAvg(o3_exposure)
+          monitor_exposure$o3 <- o3_exposure$armean * 1000
+        } else {
+          monitor_exposure$o3 <- NA
+        }
       } else {
-        monitor_exposure$o3 <- NA
+        monitor_exposure <- filter(o3_exposure, Date %in% lag_date_set)
+        monitor_exposure <- InverseWeightedAvg(monitor_exposure)
+        monitor_exposure$lon <- patient.df$Longitude[i]
+        monitor_exposure$lat <- patient.df$Latitude[i]
+        monitor_exposure$person <- i
+        monitor_exposure$o3 <- monitor_exposure$armean*1000
+        monitor_exposure$armean <- NA
       }
+      
       
       temp_exposure <- GrabAT(temp_brick, hum_brick,lon_list_temp,lat_list_temp,
                               patient.df$Longitude[i],patient.df$Latitude[i],year)
-      temp_exposure <- filter(temp_exposure, day %in% lag_dates)
+      temp_exposure <- filter(temp_exposure, day %in% lag_date_set)
     
       environmental_exp_working <- dplyr::select(monitor_exposure,Date,armean,o3,person)
       environmental_exp_working$temp <- temp_exposure$heat
+      environmental_exp_working$event <- rep(event_set,each = max_lag + 1)
+      environmental_exp_working$lag <- rep(c(max_lag:0),length(date_set))
+      environmental_exp_working$week <- rep(c(1:length(event_set)),each = max_lag+1)
+      
       
       patient_exposure <- rbind(patient_exposure,environmental_exp_working)
     }
@@ -365,6 +434,31 @@ PrintIndividual <- function(individual, environmental_exp,person_list,year){
   return(grid.arrange(p,m,g,g2,ncol = 2))
   
 }
+
+# pm_data <- pm_frm_nfrm.df
+# radius <- 20
+GetPMDates <- function(pm_data, lon_list_ap, lat_list_ap, radius,rcoord){
+  rdates <- c()
+  for (i in 1:dim(rcoord)[1]){
+    lon <- rcoord[i,1]
+    lat <- rcoord[i,2]
+    working_pm <- GetAP(pm_data, lon_list_ap, lat_list_ap, lon, lat, F, radius)
+    if (!is.na(working_pm[[1]][[1]])){
+      working_pm <- filter(working_pm,Date > as.Date("2019-01-05"))
+      rdate <- working_pm$Date[sample(sort(working_pm$armean, 
+                                           index.return=TRUE, 
+                                           decreasing=TRUE,na.last = T)$ix[1:2],1)]
+      rdates <- c(rdates, rdate)
+    } else {
+      rdate <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), 1)
+      rdates <- c(rdates, rdate)
+    }
+  }
+  return(as.Date(rdates))
+}
+
+
+
 ```
 
 ```{r}
@@ -515,7 +609,7 @@ gc()
 
 ```{r}
 
-spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles")
+spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles",1000)
 
 metro_tracts_within <- spatial_metro_list[[1]]
 metro <- spatial_metro_list[[2]]
@@ -524,7 +618,9 @@ random_points <- spatial_metro_list[[3]]
 random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
 rcoord <- st_coordinates(random_points_latlon)
 # rdates <- sample(seq(as.Date('2016/01/11'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
-rdates <- sample(seq(as.Date('2019/03/01'), as.Date('2019/10/31'), by="day"), dim(rcoord)[1])
+# rdates <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
+
+rdates <- GetPMDates(pm_frm_nfrm.df, lon_list_ap, lat_list_ap,20,rcoord) + 2
 
 patient.df <- data.frame(Longitude = rcoord[,1],
                          Latitude = rcoord[,2],
@@ -543,9 +639,12 @@ patient.df <- patient_2019.df
 
 ```{r}
 
+
 patient_exposure_2019 <- GetExposureData(patient.df,pm_frm_nfrm.df,o3_combined.df,2019,lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp)
 
+
 person_list <- unique(patient_exposure_2019$person)
+event_dates <- patient.df$Date[person_list]
 
 ggplot() + 
   geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
@@ -563,3 +662,16 @@ library(gridExtra)
 PrintIndividual(3,patient_exposure_2019,person_list,2019)
 PrintIndividual(30,patient_exposure_2019,person_list,2019)
 ```
+
+```{r}
+library(survival)
+patient_exposure_2019 <- patient_exposure
+patient_exposure_wide <- pivot_wider(patient_exposure_2019,
+                 id_cols = c(person,event,week),names_from = lag,values_from = c(armean,temp,o3))
+
+summary(clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
+                 temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
+                 o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
+                 strata(person), patient_exposure_wide))
+```
+
