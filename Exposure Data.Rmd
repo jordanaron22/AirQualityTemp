@@ -1,5 +1,5 @@
 ---
-title: "Pollutant Exposure Data"
+title: "Mice Sanity Check"
 output:
   html_document:
     df_print: paged
@@ -314,33 +314,12 @@ GetTimeStratDays <- function(patient_date){
 }
 
 
-pm_combined.df <- pm_frm_nfrm.df
-year <- 2019
-lon_list_ap <- lon_list2_ap
-lat_list_ap <- lat_list2_ap
+# pm_combined.df <- pm_frm_nfrm.df
+# year <- 2019
+# lon_list_ap <- lon_list2_ap
+# lat_list_ap <- lat_list2_ap
 
-GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp){
-  
-  file_name <- paste0("hum_array_",year,".rda")
-  hum_array <- loadRData(file_name)
-
-  hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
-                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
-                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
-  hum_brick <- t(hum_brick)
-  rm(hum_array)
-  gc()
-  
-  file_name <- paste0("temp_array_",year,".rda")
-  temp_array <- loadRData(file_name)
-  
-  temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
-                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
-                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
-  temp_brick <- t(temp_brick)
-  rm(temp_array)
-  gc()
-  
+GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3, temp_brick,hum_brick,year){
   
   patient_exposure <- data.frame()
   max_lag <- 4
@@ -352,7 +331,7 @@ GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,year,lon_li
                          patient.df$Longitude[i], patient.df$Latitude[i],T,20)
     
     date_list <- GetTimeStratDays(patient.df$Date[i])
-    date_set <- date_list[[1]]
+    date_set <- date_list[[1]]###################
     event_set <- date_list[[2]]
     date_set_max_lag <- date_set - max_lag
     lag_date_set <- as.Date(mapply(seq,date_set_max_lag,date_set,by="day"))
@@ -436,25 +415,99 @@ PrintIndividual <- function(individual, environmental_exp,person_list,year){
 }
 
 # pm_data <- pm_frm_nfrm.df
+# o3_data <- o3_combined.df
 # radius <- 20
-GetPMDates <- function(pm_data, lon_list_ap, lat_list_ap, radius,rcoord){
+# lag1 <- 1
+# lag2 <- 3
+# lag3 <- 0
+GetPMDates <- function(pm_data,o3_data, temp_brick,hum_brick,
+                       lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
+                       radius,rcoord,year,
+                       lag1,lag2,lag3){
   rdates <- c()
   for (i in 1:dim(rcoord)[1]){
     lon <- rcoord[i,1]
     lat <- rcoord[i,2]
     working_pm <- GetAP(pm_data, lon_list_ap, lat_list_ap, lon, lat, F, radius)
+    working_o3 <- GetAP(o3_combined.df, lon_list_o3,lat_list_o3, lon, lat,F,radius)
+    working_temp <- GrabAT(temp_brick, hum_brick,lon_list_temp,lat_list_temp,lon,lat,year)
+    
+    
     if (!is.na(working_pm[[1]][[1]])){
-      working_pm <- filter(working_pm,Date > as.Date("2019-01-05"))
-      rdate <- working_pm$Date[sample(sort(working_pm$armean, 
+      working_pm <- filter(working_pm,Date > as.Date("2018-12-31"))
+      rdate1 <- working_pm$Date[sample(sort(working_pm$armean, 
                                            index.return=TRUE, 
-                                           decreasing=TRUE,na.last = T)$ix[1:2],1)]
-      rdates <- c(rdates, rdate)
+                                           decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag1
+      if(rdate1 > "2019-12-31"){rdate1 <- NA}
+    } else {rdate1 <- NA}
+    
+    if (!is.na(working_o3[[1]][[1]])){
+      working_o3 <- filter(working_o3,Date > as.Date("2018-12-31"))
+      rdate2 <- working_o3$Date[sample(sort(working_o3$armean, 
+                                           index.return=TRUE, 
+                                           decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag2
+      if(rdate2 > "2019-12-31"){rdate2 <- NA}
+    } else {rdate2 <- NA}
+    
+    working_temp <- filter(working_temp,day > as.Date("2018-12-31"))
+    rdate3 <- working_temp$day[sample(sort(working_temp$heat,
+                                           index.return=TRUE,
+                                           decreasing=TRUE,na.last = T)$ix[1:20],1)] + lag3
+    
+    
+    
+    if(rdate3 > "2019-12-31"){rdate3 <- NA}
+    
+    if (!is.na(rdate1) & !is.na(rdate2)){
+      rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
+    } else if (!is.na(rdate1) | !is.na(rdate2)){
+      rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
     } else {
       rdate <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), 1)
-      rdates <- c(rdates, rdate)
     }
+    
+    rdates <- c(rdates, rdate)
   }
   return(as.Date(rdates))
+}
+
+ImputedDensity <- function(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,lag){
+  x <- unlist(patient_exposure_test_full[,lag],use.names = F)[pat_exp_bool[,lag]]
+  y <- unlist(patient_exposure_test_med[,lag],use.names = F)[pat_exp_bool[,lag]]
+  
+  if (lag == 1){
+    lag_to_print <- 4
+  } else if (lag == 2){
+    lag_to_print <- 3
+  } else if (lag == 3){
+    lag_to_print <- 2
+  } else if (lag == 4){
+    lag_to_print <- 1
+  } else if (lag == 5){
+    lag_to_print <- 1
+  }
+  
+  plot(density(y),main = paste0("Original vs Imputed Density for Armean ",lag_to_print))
+  lines(density(x), col = 2)
+  legend("topright", legend=c("Imputed","Original"), fill=1:2)
+}
+
+ImputedBox <- function(pat_exp_resid,lag){
+  if (lag == 1){
+    lag_to_print <- 4
+  } else if (lag == 2){
+    lag_to_print <- 3
+  } else if (lag == 3){
+    lag_to_print <- 2
+  } else if (lag == 4){
+    lag_to_print <- 1
+  } else if (lag == 5){
+    lag_to_print <- 1
+  }
+  
+  x <- pat_exp_resid[,lag]
+  x <- x[x != 0]
+  boxplot(x, main = paste0("Boxplot of (Obs-Imp)/Imp for Armean ",lag_to_print))
 }
 
 
@@ -514,6 +567,9 @@ pm_frm_nfrm.df$armean <- armean
 pm_frm_nfrm.df <- pm_frm_nfrm.df[,c(1:4)]
 pm_frm.df <- pm_combined.df
 
+rm(pm_combined.df)
+rm(pm2_combined.df)
+
 rm(pm_2016)
 rm(pm_2017)
 rm(pm_2018)
@@ -530,6 +586,10 @@ rm(o3_2018)
 rm(o3_2019)
 
 rm(census)
+
+rm(o3_combined)
+rm(pm_combined)
+rm(pm2_combined)
 
 lon_list_ap <- unique(pm_frm.df$Longitude)
 lat_list_ap <- unique(pm_frm.df$Latitude)
@@ -597,17 +657,42 @@ library(abind)
 # rm(temp_array_2019)
 # rm(hum_array_2019)
 # gc()
+```
 
-templatlon <- GetTempLatLon(2019)
+```{r}
+year <- 2019
+templatlon <- GetTempLatLon(year)
 lon_list_temp <- templatlon[[1]]
 lat_list_temp <- templatlon[[2]]
 rm(templatlon)
 
 gc()
 
+file_name <- paste0("hum_array_",year,".rda")
+hum_array <- loadRData(file_name)
+
+hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                 ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                 crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+hum_brick <- t(hum_brick)
+rm(hum_array)
+gc()
+
+file_name <- paste0("temp_array_",year,".rda")
+temp_array <- loadRData(file_name)
+
+temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                 ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                 crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+temp_brick <- t(temp_brick)
+rm(temp_array)
+gc()
+
 ```
 
+
 ```{r}
+gc()
 
 spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles",1000)
 
@@ -620,12 +705,14 @@ rcoord <- st_coordinates(random_points_latlon)
 # rdates <- sample(seq(as.Date('2016/01/11'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
 # rdates <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
 
-rdates <- GetPMDates(pm_frm_nfrm.df, lon_list_ap, lat_list_ap,20,rcoord) + 2
+rdates <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick,hum_brick,
+                     lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
+                     20,rcoord,year,
+                     2,4,0)
 
 patient.df <- data.frame(Longitude = rcoord[,1],
                          Latitude = rcoord[,2],
                          Date = rdates)
-
 
 patient_2016.df <- filter(patient.df,Date >= "2016-01-01" & Date < "2017-01-01")
 patient_2017.df <- filter(patient.df,Date >= "2017-01-01" & Date < "2018-01-01")
@@ -637,10 +724,12 @@ patient.df <- patient_2019.df
 
 ```
 
+
+
 ```{r}
 
 
-patient_exposure_2019 <- GetExposureData(patient.df,pm_frm_nfrm.df,o3_combined.df,2019,lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp)
+patient_exposure_2019 <- GetExposureData(patient.df,pm_frm_nfrm.df,o3_combined.df,lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,temp_brick,hum_brick,year)
 
 
 person_list <- unique(patient_exposure_2019$person)
@@ -658,20 +747,102 @@ ggplot() +
 
 
 ```{r}
-library(gridExtra)
-PrintIndividual(3,patient_exposure_2019,person_list,2019)
-PrintIndividual(30,patient_exposure_2019,person_list,2019)
+# library(gridExtra)
+# PrintIndividual(3,patient_exposure_2019,person_list,2019)
 ```
 
 ```{r}
+#2 day lag for pm2.5
+#4 day lag for o3
+#0 day lag for temp
 library(survival)
-patient_exposure_2019 <- patient_exposure
+library(mice)
+library(VIM)
 patient_exposure_wide <- pivot_wider(patient_exposure_2019,
                  id_cols = c(person,event,week),names_from = lag,values_from = c(armean,temp,o3))
 
-summary(clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
+
+#View(md.pattern(patient_exposure_wide))
+# aggr_plot <- aggr(patient_exposure_wide, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(patient_exposure_wide), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+# aggr_plot
+
+imputed_patient_exposure <- mice(patient_exposure_wide,m=5,maxit=50,meth='pmm',seed=500)
+
+model1 <- clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
                  temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
                  o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
-                 strata(person), patient_exposure_wide))
+                 strata(person), patient_exposure_wide)
+summary(model1)
+
+model2 <- with(imputed_patient_exposure,clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
+                 temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
+                 o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
+                 strata(person)))
+summary(pool(model2))
 ```
 
+```{r}
+patient_exposure_test_full <- na.omit(patient_exposure_wide)
+patient_exposure_test <- na.omit(patient_exposure_wide)
+for (i in 1:dim(patient_exposure_test)[1]){
+  if (rbinom(1,1,.2) == 1){
+    if (i %% 3 == 0){
+      patient_exposure_test$armean_4[i] <- NA
+      patient_exposure_test$armean_2[i] <- NA
+      patient_exposure_test$armean_1[i] <- NA
+    } else if (i %%3 == 1){
+      patient_exposure_test$armean_4[i] <- NA
+      patient_exposure_test$armean_3[i] <- NA
+      patient_exposure_test$armean_1[i] <- NA
+      patient_exposure_test$armean_0[i] <- NA
+    } else {
+      patient_exposure_test$armean_3[i] <- NA
+      patient_exposure_test$armean_2[i] <- NA
+      patient_exposure_test$armean_0[i] <- NA
+    }
+  }
+}
+
+patient_exposure_test_imp <- mice(patient_exposure_test,m=5,maxit=50,meth='pmm',seed=500)
+patient_exposure_test_imp1 <- complete(patient_exposure_test_imp,1)
+patient_exposure_test_imp2 <- complete(patient_exposure_test_imp,2)
+patient_exposure_test_imp3 <- complete(patient_exposure_test_imp,3)
+patient_exposure_test_imp4 <- complete(patient_exposure_test_imp,4)
+patient_exposure_test_imp5 <- complete(patient_exposure_test_imp,5)
+
+patient_exposure_test_med <- patient_exposure_test_imp1
+for (i in 1:dim(patient_exposure_test_imp1)[1]){
+  for (j in 1:dim(patient_exposure_test_imp1)[2]){
+    patient_exposure_test_med[i,j] <- median(c(patient_exposure_test_imp1[i,j],
+                                               patient_exposure_test_imp2[i,j],
+                                               patient_exposure_test_imp3[i,j],
+                                               patient_exposure_test_imp4[i,j],
+                                               patient_exposure_test_imp5[i,j]))
+  }
+}
+
+patient_exposure_test_med <- dplyr::select(patient_exposure_test_med,c(armean_4,armean_3,armean_2,armean_1,armean_0))
+
+patient_exposure_test_full <- dplyr::select(patient_exposure_test_full,c(armean_4,armean_3,armean_2,armean_1,armean_0))
+
+
+pat_exp_resid <- (patient_exposure_test_full - patient_exposure_test_med)/patient_exposure_test_med
+pat_exp_bool <- pat_exp_resid != 0
+
+#Density plot of ONLY removed values
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,1)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,2)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,3)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,4)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,5)
+
+
+
+#Boxplot of ONLY removed values
+ImputedBox(pat_exp_resid,1)
+ImputedBox(pat_exp_resid,2)
+ImputedBox(pat_exp_resid,3)
+ImputedBox(pat_exp_resid,4)
+ImputedBox(pat_exp_resid,5)
+  
+```
