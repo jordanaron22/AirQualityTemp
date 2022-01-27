@@ -9,7 +9,9 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+###### Function Calls 
+
+```{r, include = F}
 library(dplyr)
 library(ggplot2)
 library(sp)
@@ -25,6 +27,13 @@ library(dplyr)
 library(tidyverse)
 library(tidycensus)
 library(lubridate)
+
+library(ncdf4) # package for netcdf manipulation
+library(raster) # package for raster manipulation
+library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+library(weathermetrics) #rhum to dew
+library(abind)
 
 set.seed(10)
 
@@ -187,7 +196,7 @@ GrabAT <- function(temp_brick,hum_brick, lon_list_temp, lat_list_temp, lon, lat,
 
 SimulateMetroData <- function(States,City,samp_size){
 
-  metro_tracts <- map_dfr(States, ~{
+  metro_tracts <- map_dfr(States,progress_bar=F, ~{
     tracts(.x, cb = TRUE, year = 2020)
   }) %>%
     st_transform(8528)
@@ -386,6 +395,10 @@ PrintIndividual <- function(individual, environmental_exp,person_list,year){
 
   environmental_exp_filt <- filter(environmental_exp, person == person_list[individual])
   
+  environmental_exp_filt <- environmental_exp_filt %>% 
+    mutate(Date = Date) %>%
+    complete(Date = seq(min(environmental_exp_filt$Date),max(environmental_exp_filt$Date), by = "day"))
+  
   p <- ggplot() +
     geom_line(data=environmental_exp_filt, aes(x=Date, y=temp)) +
     # scale_x_date(date_breaks = "d", date_labels =  "%d") +
@@ -406,7 +419,6 @@ PrintIndividual <- function(individual, environmental_exp,person_list,year){
   m <- ggplot() + 
     geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
     geom_sf(data = metro, fill = NA, color = "red") + 
-    geom_sf(data = random_points[person_list], color = "blue") + 
     geom_sf(data = random_points[person_list[individual]], color = "forestgreen", size = 3) + 
     theme_void()
   
@@ -424,6 +436,10 @@ GetPMDates <- function(pm_data,o3_data, temp_brick,hum_brick,
                        lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
                        radius,rcoord,year,
                        lag1,lag2,lag3){
+  
+  last_day <- as.Date(paste0(year,"-12-31"))
+  first_day <- as.Date(paste0(year,"-01-01"))
+  
   rdates <- c()
   for (i in 1:dim(rcoord)[1]){
     lon <- rcoord[i,1]
@@ -434,36 +450,36 @@ GetPMDates <- function(pm_data,o3_data, temp_brick,hum_brick,
     
     
     if (!is.na(working_pm[[1]][[1]])){
-      working_pm <- filter(working_pm,Date > as.Date("2018-12-31"))
+      working_pm <- filter(working_pm,Date > first_day-1)
       rdate1 <- working_pm$Date[sample(sort(working_pm$armean, 
                                            index.return=TRUE, 
                                            decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag1
-      if(rdate1 > "2019-12-31"){rdate1 <- NA}
+      if(rdate1 > last_day){rdate1 <- NA}
     } else {rdate1 <- NA}
     
     if (!is.na(working_o3[[1]][[1]])){
-      working_o3 <- filter(working_o3,Date > as.Date("2018-12-31"))
+      working_o3 <- filter(working_o3,Date > first_day-1)
       rdate2 <- working_o3$Date[sample(sort(working_o3$armean, 
                                            index.return=TRUE, 
                                            decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag2
-      if(rdate2 > "2019-12-31"){rdate2 <- NA}
+      if(rdate2 > last_day){rdate2 <- NA}
     } else {rdate2 <- NA}
     
-    working_temp <- filter(working_temp,day > as.Date("2018-12-31"))
+    working_temp <- filter(working_temp,day > first_day-1)
     rdate3 <- working_temp$day[sample(sort(working_temp$heat,
                                            index.return=TRUE,
                                            decreasing=TRUE,na.last = T)$ix[1:20],1)] + lag3
     
     
     
-    if(rdate3 > "2019-12-31"){rdate3 <- NA}
+    if(rdate3 > last_day){rdate3 <- NA}
     
     if (!is.na(rdate1) & !is.na(rdate2)){
       rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
     } else if (!is.na(rdate1) | !is.na(rdate2)){
       rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
     } else {
-      rdate <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), 1)
+      rdate <- sample(seq(first_day, last_day, by="day"), 1)
     }
     
     rdates <- c(rdates, rdate)
@@ -471,7 +487,7 @@ GetPMDates <- function(pm_data,o3_data, temp_brick,hum_brick,
   return(as.Date(rdates))
 }
 
-ImputedDensity <- function(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,lag){
+ImputedDensity <- function(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,lag,missing_only,x_hi,y_hi){
   x <- unlist(patient_exposure_test_full[,lag],use.names = F)[pat_exp_bool[,lag]]
   y <- unlist(patient_exposure_test_med[,lag],use.names = F)[pat_exp_bool[,lag]]
   
@@ -487,7 +503,16 @@ ImputedDensity <- function(patient_exposure_test_full,patient_exposure_test_med,
     lag_to_print <- 1
   }
   
-  plot(density(y),main = paste0("Original vs Imputed Density for Armean ",lag_to_print))
+  if (missing_only){
+    missing_only <- "Missing Only"
+  } else {
+    missing_only <- ""
+  }
+  
+  plot(density(y),
+       main = paste0("Original vs Imputed Density for ", missing_only ," Armean ",lag_to_print),
+       xlim = c(0,x_hi),
+       ylim = c(0,y_hi))
   lines(density(x), col = 2)
   legend("topright", legend=c("Imputed","Original"), fill=1:2)
 }
@@ -510,9 +535,36 @@ ImputedBox <- function(pat_exp_resid,lag){
   boxplot(x, main = paste0("Boxplot of (Obs-Imp)/Imp for Armean ",lag_to_print))
 }
 
+ReturnHumBrick <- function(year,lon_list_temp,lat_list_temp){
+  file_name <- paste0("hum_array_",year,".rda")
+  hum_array <- loadRData(file_name)
+  
+  hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  rm(hum_array)
+  hum_brick <- t(hum_brick)
+  gc()
+  return(hum_brick)
+}
+
+ReturnTempBrick <- function(year,lon_list_temp,lat_list_temp){
+  file_name <- paste0("temp_array_",year,".rda")
+  temp_array <- loadRData(file_name)
+  
+  temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  rm(temp_array)
+  temp_brick <- t(temp_brick)
+  gc()
+  return(temp_brick)
+}
 
 
 ```
+
+###### Data Set Up
 
 ```{r}
 census <- read.xlsx("CensusList.xlsx")
@@ -603,21 +655,23 @@ lat_list_o3 <- unique(o3_combined.df$Latitude)
 ```
 
 ```{r}
-library(ncdf4) # package for netcdf manipulation
-library(raster) # package for raster manipulation
-library(rgdal) # package for geospatial analysis
-library(ggplot2) # package for plotting
-library(weathermetrics) #rhum to dew
-library(abind)
-
 ### Saving all AT arrays
 ### combine last 10 days from previous year
 ### When going thru patients we can now look at years individually
-
+# 
+# temp_array_2015 <- GetTempArray("2015")
+# hum_array_2015 <- GetHumArray("2015")
+# temp_array_end_2015 <- temp_array_2015[,,356:365]
+# hum_array_end_2015 <- hum_array_2015[,,356:365]
+# rm(temp_array_2015)
+# rm(hum_array_2015)
+# 
 # temp_array_2016 <- GetTempArray("2016")
 # hum_array_2016 <- GetHumArray("2016")
 # temp_array_end_2016 <- temp_array_2016[,,357:366]
 # hum_array_end_2016 <- hum_array_2016[,,357:366]
+# temp_array_2016 <- abind(temp_array_end_2015,temp_array_2016,along = 3)
+# hum_array_2016 <- abind(hum_array_end_2015,hum_array_2016,along = 3)
 # save(temp_array_2016, file = "temp_array_2016.rda")
 # save(hum_array_2016, file = "hum_array_2016.rda")
 # rm(temp_array_2016)
@@ -659,8 +713,7 @@ library(abind)
 # gc()
 ```
 
-```{r}
-year <- 2019
+```{r, include=FALSE}
 templatlon <- GetTempLatLon(year)
 lon_list_temp <- templatlon[[1]]
 lat_list_temp <- templatlon[[2]]
@@ -668,30 +721,23 @@ rm(templatlon)
 
 gc()
 
-file_name <- paste0("hum_array_",year,".rda")
-hum_array <- loadRData(file_name)
-
-hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
-                 ymn=min(lon_list_temp), ymx=max(lon_list_temp),
-                 crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
-hum_brick <- t(hum_brick)
-rm(hum_array)
+hum_brick_2019 <- ReturnHumBrick(2019,lon_list_temp,lat_list_temp)
 gc()
 
-file_name <- paste0("temp_array_",year,".rda")
-temp_array <- loadRData(file_name)
-
-temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
-                 ymn=min(lon_list_temp), ymx=max(lon_list_temp),
-                 crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
-temp_brick <- t(temp_brick)
-rm(temp_array)
+temp_brick_2019 <- ReturnTempBrick(2019,lon_list_temp,lat_list_temp)
 gc()
 
+hum_brick_2018 <- ReturnHumBrick(2018,lon_list_temp,lat_list_temp)
+gc()
+
+temp_brick_2018 <- ReturnTempBrick(2018,lon_list_temp,lat_list_temp)
+gc()
 ```
+ 
+###### Simulate Data
 
 
-```{r}
+```{r, message = FALSE}
 gc()
 
 spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles",1000)
@@ -702,17 +748,18 @@ random_points <- spatial_metro_list[[3]]
 
 random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
 rcoord <- st_coordinates(random_points_latlon)
-# rdates <- sample(seq(as.Date('2016/01/11'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
-# rdates <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
 
-rdates <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick,hum_brick,
-                     lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
-                     20,rcoord,year,
-                     2,4,0)
+rdates_2019 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2019,hum_brick_2019,
+                          lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
+                          20,rcoord[1:500,],2019,2,4,0)
+
+rdates_2018 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2018,hum_brick_2018,
+                          lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
+                          20,rcoord[501:1000,],2018,2,4,0)
 
 patient.df <- data.frame(Longitude = rcoord[,1],
                          Latitude = rcoord[,2],
-                         Date = rdates)
+                         Date = c(rdates_2019,rdates_2018))
 
 patient_2016.df <- filter(patient.df,Date >= "2016-01-01" & Date < "2017-01-01")
 patient_2017.df <- filter(patient.df,Date >= "2017-01-01" & Date < "2018-01-01")
@@ -720,16 +767,19 @@ patient_2018.df <- filter(patient.df,Date >= "2018-01-01" & Date < "2019-01-01")
 patient_2019.df <- filter(patient.df,Date >= "2019-01-01" & Date < "2020-01-01")
 
 
-patient.df <- patient_2019.df
-
 ```
-
-
+###### Analysis
 
 ```{r}
 
 
-patient_exposure_2019 <- GetExposureData(patient.df,pm_frm_nfrm.df,o3_combined.df,lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,temp_brick,hum_brick,year)
+patient_exposure_2019 <- GetExposureData(patient_2019.df,pm_frm_nfrm.df,o3_combined.df,
+                                         lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,
+                                         temp_brick_2019,hum_brick_2019,2019)
+
+patient_exposure_2018 <- GetExposureData(patient_2018.df,pm_frm_nfrm.df,o3_combined.df,
+                                         lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,
+                                         temp_brick_2018,hum_brick_2018,2018)
 
 
 person_list <- unique(patient_exposure_2019$person)
@@ -738,17 +788,17 @@ event_dates <- patient.df$Date[person_list]
 ggplot() + 
   geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
   geom_sf(data = metro, fill = NA, color = "red") + 
+  geom_sf(data = random_points, color = "red") + 
   geom_sf(data = random_points[person_list], color = "blue") + 
   theme_void()
 
 ```
 
 
-
-
 ```{r}
-# library(gridExtra)
-# PrintIndividual(3,patient_exposure_2019,person_list,2019)
+library(gridExtra)
+PrintIndividual(3,patient_exposure_2019,person_list,2019)
+PrintIndividual(30,patient_exposure_2019,person_list,2019)
 ```
 
 ```{r}
@@ -758,15 +808,13 @@ ggplot() +
 library(survival)
 library(mice)
 library(VIM)
-patient_exposure_wide <- pivot_wider(patient_exposure_2019,
+
+patient_exposure_2018$person <- patient_exposure_2018$person + max(patient_exposure_2019$person)
+
+patient_exposure <- rbind(patient_exposure_2019,patient_exposure_2018)
+
+patient_exposure_wide <- pivot_wider(patient_exposure,
                  id_cols = c(person,event,week),names_from = lag,values_from = c(armean,temp,o3))
-
-
-#View(md.pattern(patient_exposure_wide))
-# aggr_plot <- aggr(patient_exposure_wide, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(patient_exposure_wide), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
-# aggr_plot
-
-imputed_patient_exposure <- mice(patient_exposure_wide,m=5,maxit=50,meth='pmm',seed=500)
 
 model1 <- clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
                  temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
@@ -774,75 +822,5 @@ model1 <- clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
                  strata(person), patient_exposure_wide)
 summary(model1)
 
-model2 <- with(imputed_patient_exposure,clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
-                 temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
-                 o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
-                 strata(person)))
-summary(pool(model2))
 ```
 
-```{r}
-patient_exposure_test_full <- na.omit(patient_exposure_wide)
-patient_exposure_test <- na.omit(patient_exposure_wide)
-for (i in 1:dim(patient_exposure_test)[1]){
-  if (rbinom(1,1,.2) == 1){
-    if (i %% 3 == 0){
-      patient_exposure_test$armean_4[i] <- NA
-      patient_exposure_test$armean_2[i] <- NA
-      patient_exposure_test$armean_1[i] <- NA
-    } else if (i %%3 == 1){
-      patient_exposure_test$armean_4[i] <- NA
-      patient_exposure_test$armean_3[i] <- NA
-      patient_exposure_test$armean_1[i] <- NA
-      patient_exposure_test$armean_0[i] <- NA
-    } else {
-      patient_exposure_test$armean_3[i] <- NA
-      patient_exposure_test$armean_2[i] <- NA
-      patient_exposure_test$armean_0[i] <- NA
-    }
-  }
-}
-
-patient_exposure_test_imp <- mice(patient_exposure_test,m=5,maxit=50,meth='pmm',seed=500)
-patient_exposure_test_imp1 <- complete(patient_exposure_test_imp,1)
-patient_exposure_test_imp2 <- complete(patient_exposure_test_imp,2)
-patient_exposure_test_imp3 <- complete(patient_exposure_test_imp,3)
-patient_exposure_test_imp4 <- complete(patient_exposure_test_imp,4)
-patient_exposure_test_imp5 <- complete(patient_exposure_test_imp,5)
-
-patient_exposure_test_med <- patient_exposure_test_imp1
-for (i in 1:dim(patient_exposure_test_imp1)[1]){
-  for (j in 1:dim(patient_exposure_test_imp1)[2]){
-    patient_exposure_test_med[i,j] <- median(c(patient_exposure_test_imp1[i,j],
-                                               patient_exposure_test_imp2[i,j],
-                                               patient_exposure_test_imp3[i,j],
-                                               patient_exposure_test_imp4[i,j],
-                                               patient_exposure_test_imp5[i,j]))
-  }
-}
-
-patient_exposure_test_med <- dplyr::select(patient_exposure_test_med,c(armean_4,armean_3,armean_2,armean_1,armean_0))
-
-patient_exposure_test_full <- dplyr::select(patient_exposure_test_full,c(armean_4,armean_3,armean_2,armean_1,armean_0))
-
-
-pat_exp_resid <- (patient_exposure_test_full - patient_exposure_test_med)/patient_exposure_test_med
-pat_exp_bool <- pat_exp_resid != 0
-
-#Density plot of ONLY removed values
-ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,1)
-ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,2)
-ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,3)
-ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,4)
-ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,5)
-
-
-
-#Boxplot of ONLY removed values
-ImputedBox(pat_exp_resid,1)
-ImputedBox(pat_exp_resid,2)
-ImputedBox(pat_exp_resid,3)
-ImputedBox(pat_exp_resid,4)
-ImputedBox(pat_exp_resid,5)
-  
-```
