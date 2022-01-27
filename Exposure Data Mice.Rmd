@@ -1,0 +1,893 @@
+---
+title: "Mice Sanity Check"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(sp)
+library(geosphere)
+library(openxlsx)
+library(xts)
+library(sf)
+library(sp)
+library(tmap)
+library(spdep)
+library(tigris)
+library(dplyr)
+library(tidyverse)
+library(tidycensus)
+library(lubridate)
+
+set.seed(10)
+
+`%!in%` <- Negate(`%in%`)
+
+CleanCombinedData <- function(pm_combined,countystate){
+  
+  pm_combined_clean <- pm_combined %>% filter(Observation.Percent >= 50) 
+  
+  CBSA_list <- unique(pm_combined_clean$CBSA.Name)
+  CBSA_ind <- c(19,29,39,47,49,62,77,79,82,86,89,96,114,116,174,179,192,196,227,248,281,316,319,321,342)
+  
+  CBSA_list[CBSA_ind]
+  
+  pm_combined_clean <- mutate(pm_combined_clean, combined_county_state = paste(County.Name, State.Name))
+  
+  pm_combined_clean <- pm_combined_clean %>% filter((combined_county_state %in% countystate) | CBSA.Name %in% CBSA_list[CBSA_ind])
+  
+  pm_combined_clean <- subset(pm_combined_clean, Arithmetic.Mean >= 0 )
+  
+  unique(pm_combined_clean$combined_county_state)[unique(pm_combined_clean$combined_county_state) %!in% countystate]
+  
+  lon_list_ap <- unique(pm_combined_clean$Longitude)
+  lat_list_ap <- unique(pm_combined_clean$Latitude)
+  samdur_list <- unique(pm_combined_clean$Sample.Duration)
+  
+  pm_combined.df <- data.frame()
+  date_list <- seq.Date(as.Date("2016-01-01"),as.Date("2019-12-31"),"day")
+  
+  for (lat_ind in 1:length(lat_list_ap)){
+    working_pm_combined <- filter(pm_combined_clean,Latitude == lat_list_ap[lat_ind])
+    
+    method1 <- filter(working_pm_combined,Sample.Duration == samdur_list[1])
+    method1 <- dplyr::select(method1,Date.Local, Arithmetic.Mean)
+    if (dim(method1)[1]>0){method1 <- aggregate(Arithmetic.Mean ~ Date.Local, method1, mean)}
+    method1 <- as.data.frame(method1) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    method2 <- filter(working_pm_combined,Sample.Duration == samdur_list[2])
+    method2 <- dplyr::select(method2,Date.Local, Arithmetic.Mean)
+    if (dim(method2)[1]>0){method2 <- aggregate(Arithmetic.Mean ~ Date.Local, method2, mean)}
+    method2 <- as.data.frame(method2) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    method3 <- filter(working_pm_combined,Sample.Duration == samdur_list[3])
+    # if (length(unique(method3$POC)) > 1){
+      # print(lat_ind)
+    # }
+    method3 <- dplyr::select(method3,Date.Local, Arithmetic.Mean)
+    if (dim(method3)[1]>0){method3 <- aggregate(Arithmetic.Mean ~ Date.Local, method3, mean)}
+    method3 <- as.data.frame(method3) %>% 
+      mutate(Date = as.Date(Date.Local)) %>%
+      complete(Date = date_list)
+    
+    
+    missing_inds <- which(is.na(method3$Arithmetic.Mean))
+    method3$Arithmetic.Mean[missing_inds] <- method2$Arithmetic.Mean[missing_inds]
+  
+    missing_inds <- which(is.na(method3$Arithmetic.Mean))
+    method3$Arithmetic.Mean[missing_inds] <- method1$Arithmetic.Mean[missing_inds]
+    
+    
+    to_add.df <- data.frame(Latitude = lat_list_ap[lat_ind],
+                            Longitude = lon_list_ap[lat_ind],
+                            Date = method3$Date,
+                            armean = method3$Arithmetic.Mean)
+    
+    pm_combined.df <- rbind(pm_combined.df,to_add.df)
+  }
+  return(pm_combined.df)
+}
+
+GetMonitorPM <- function(lon_list_ap,lat_list_ap,lon,lat, return_mult, radius){
+  combined_lonlat <- cbind(lon_list_ap,lat_list_ap)
+  dist <- apply(combined_lonlat,1,distHaversine,p1 = c(lon,lat)) * .001
+  if (min(dist) > radius){
+    # print("Error: No measurements within radius")
+    return(NA)
+  }
+  if (return_mult){
+    within_rad <- which(dist<radius)
+    return(cbind(lon_list_ap[within_rad],lat_list_ap[within_rad]))
+  } else {
+   return(cbind(lon_list_ap[which.min(dist)],lat_list_ap[which.min(dist)]))
+  }
+}
+
+GetAP <- function(pm_data, lon_list_ap, lat_list_ap, lon, lat, return_mult, radius){
+
+  lonlat <- GetMonitorPM(lon_list_ap,lat_list_ap, lon,lat,return_mult,radius)
+  
+  if (is.na(lonlat[1])){
+    return(NA)
+  }
+  
+  ap_df <- data.frame()
+  
+  for (i in 1:dim(lonlat)[1]){
+    lon_adj <- lonlat[i,1]
+    lat_adj <- lonlat[i,2]
+    
+    dist <- distHaversine(c(lon,lat),c(lon_adj,lat_adj), r=6378137) * 0.001
+    ap_series <- filter(pm_data, Latitude == lat_adj & Longitude == lon_adj)
+    
+    to_add <- dplyr::select(ap_series,armean, Date)
+    to_add$AirMonDist <- dist
+    
+    ap_df <- rbind(ap_df, to_add)
+  }
+  
+  return(ap_df)
+}
+
+InverseWeightedAvg <- function(MultiAM.df){
+  spread_ap <- spread(MultiAM.df,AirMonDist,armean)
+  dist_vec <- as.double(colnames(spread_ap)[2:dim(spread_ap)[2]])
+  inv_weighted_vec <- numeric(dim(spread_ap)[1])
+  for(i in 1:dim(spread_ap)[1]){
+    
+    armeans <- spread_ap[i,2:dim(spread_ap)[2]]
+    
+    if (sum(is.na(armeans)) == 3){
+      inv_weighted_vec[i] <- NA
+    } else {
+      total_dist <- as.integer(!is.na(armeans)) %*% (1/dist_vec)
+      armeans * (1/dist_vec)
+      inv_weighted_armean <- sum((armeans / dist_vec)/total_dist, na.rm = T)
+      
+      inv_weighted_vec[i] <- inv_weighted_armean
+    }
+  }
+  inv_weighted.df <- mutate(dplyr::select(spread_ap,Date),armean = inv_weighted_vec)
+  
+  missing_days <- which(inv_weighted.df$armean == 0)
+  inv_weighted.df$armean[missing_days] <- NA
+  
+  return(inv_weighted.df)
+}
+
+GrabAT <- function(temp_brick,hum_brick, lon_list_temp, lat_list_temp, lon, lat,year){
+  
+  lon_adj <- lon_list_temp[which(abs(lon_list_temp-lon)==min(abs(lon_list_temp-lon)))]
+  lat_adj <- lat_list_temp[which(abs(lat_list_temp-lat)==min(abs(lat_list_temp-lat)))]
+  
+  hum_series <- extract(hum_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple',layer = 30)
+  temp_series <- extract(temp_brick, SpatialPoints(cbind(lon_adj,lat_adj)), method='simple')
+  
+  start_date <- as.Date(paste0(year,"-01-01")) - 10
+  end_date <- as.Date(paste0(year,"-12-31"))
+  
+  heat_ind <- heat.index(t = c(temp_series), rh = c(hum_series), temperature.metric = "celsius")
+  
+  at_temp_df <- data.frame(day = seq(start_date,end_date, by = "day"),
+                           heat = heat_ind)
+  
+  return(at_temp_df)
+}
+
+SimulateMetroData <- function(States,City,samp_size){
+
+  metro_tracts <- map_dfr(States, ~{
+    tracts(.x, cb = TRUE, year = 2020)
+  }) %>%
+    st_transform(8528)
+  
+  metro <- core_based_statistical_areas(cb = TRUE, year = 2020) %>%
+    filter(str_detect(NAME, City)) %>%
+    st_transform(8528)
+  
+  metro_tracts_within <- metro_tracts %>%
+    st_filter(metro, .predicate = st_within)
+  
+  random_points <- st_sample(metro, size = samp_size)
+  return(list(metro_tracts_within,metro,random_points))
+}
+
+GetTempLatLon <- function(year){
+  
+  file_name <- paste0("netcdf files/tmmx_",year,".nc")
+  temp_data <- nc_open(file_name)
+  lon_list_temp <- ncvar_get(temp_data, "lon")
+  lat_list_temp <- ncvar_get(temp_data, "lat", verbose = F)
+  
+  return(list(lon_list_temp,lat_list_temp))
+}
+
+GetTempArray <- function(year){
+  
+  file_name <- paste0("netcdf files/tmmx_",year,".nc")
+  temp_data <- nc_open(file_name)
+  # {
+  #     sink('tmmx_2016.txt')
+  #  print(nc_data)
+  #     sink()
+  # }
+  
+  # lon_list_temp <- ncvar_get(temp_data, "lon")
+  # lat_list_temp <- ncvar_get(temp_data, "lat", verbose = F)
+  # t_list <- ncvar_get(temp_data, "day")
+  
+  temp_array <- ncvar_get(temp_data, "air_temperature")
+  
+  fillvalue_temp <- ncatt_get(temp_data, "air_temperature", "_FillValue")
+  nc_close(temp_data) 
+  temp_array[temp_array == fillvalue_temp$value] <- NA
+  
+  temp_array <- convert_temperature(temp_array,old_metric = "k", new_metric = "c")
+  
+  return(temp_array)
+}
+  
+GetHumArray <- function(year){
+  
+  file_name <- paste0("netcdf files/rmin_",year,".nc")
+  hum_data <- nc_open(file_name)
+  # {
+  #     sink('rmin_2016.txt')
+  #  print(hum_data)
+  #     sink()
+  # }
+
+  hum_array <- ncvar_get(hum_data, "relative_humidity")
+
+  fillvalue_hum <- ncatt_get(hum_data, "relative_humidity", "_FillValue")
+  nc_close(hum_data) 
+  hum_array[hum_array == fillvalue_hum$value] <- NA
+  
+  return(hum_array)
+}
+
+GetATArray <- function(temp_array, hum_array){
+  dew_array <-  humidity.to.dewpoint(hum_array,temp_array,temperature.metric = "celsius")
+  at_array <- -2.653 + (.994 * temp_array) + (.0153 * dew_array^2)
+  
+  return(at_array)
+}
+
+loadRData <- function(fileName){
+#loads an RData file, and returns it
+    load(fileName)
+    get(ls()[ls() != "fileName"])
+}
+
+GetTimeStratDays <- function(patient_date){
+  date_set <- c(patient_date)
+  event <- c(1)
+  
+  #Looking back
+  if (month(patient_date - 7) == month(patient_date)){
+    date_set <- c(patient_date - 7, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 14) == month(patient_date)){
+    date_set <- c(patient_date - 14, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 21) == month(patient_date)){
+    date_set <- c(patient_date - 21, date_set)
+    event <- c(0,event)
+  }
+  if (month(patient_date - 28) == month(patient_date)){
+    date_set <- c(patient_date - 28, date_set)
+    event <- c(0,event)
+  }
+  
+  #Looking forward
+  if (month(patient_date + 7) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 7)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 14) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 14)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 21) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 21)
+    event <- c(event,0)
+  }
+  if (month(patient_date + 28) == month(patient_date)){
+    date_set <- c(date_set,patient_date + 28)
+    event <- c(event,0)
+  }
+  
+  return(list(date_set,event))
+}
+
+
+# pm_combined.df <- pm_frm_nfrm.df
+# year <- 2019
+# lon_list_ap <- lon_list2_ap
+# lat_list_ap <- lat_list2_ap
+
+GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3, temp_brick,hum_brick,year){
+  
+  patient_exposure <- data.frame()
+  max_lag <- 4
+  for (i in 1:dim(patient.df)[1]){
+    
+    monitor_exposure <- GetAP(pm_combined.df, lon_list_ap, lat_list_ap,
+                              patient.df$Longitude[i], patient.df$Latitude[i],T,20)
+    o3_exposure <- GetAP(o3_combined.df, lon_list_o3,lat_list_o3,
+                         patient.df$Longitude[i], patient.df$Latitude[i],T,20)
+    
+    date_list <- GetTimeStratDays(patient.df$Date[i])
+    date_set <- date_list[[1]]###################
+    event_set <- date_list[[2]]
+    date_set_max_lag <- date_set - max_lag
+    lag_date_set <- as.Date(mapply(seq,date_set_max_lag,date_set,by="day"))
+    
+    if (!is.na(monitor_exposure[[1]][1]) | !is.na(o3_exposure[[1]][1])){
+      
+      if (!is.na(monitor_exposure[[1]][1])){
+        monitor_exposure <- filter(monitor_exposure, Date %in% lag_date_set)
+        monitor_exposure <- InverseWeightedAvg(monitor_exposure)
+        monitor_exposure$lon <- patient.df$Longitude[i]
+        monitor_exposure$lat <- patient.df$Latitude[i]
+        monitor_exposure$person <- i
+        
+        if (!is.na(o3_exposure[[1]][1])){
+          o3_exposure <- filter(o3_exposure, Date %in% lag_date_set)
+          o3_exposure <- InverseWeightedAvg(o3_exposure)
+          monitor_exposure$o3 <- o3_exposure$armean * 1000
+        } else {
+          monitor_exposure$o3 <- NA
+        }
+      } else {
+        monitor_exposure <- filter(o3_exposure, Date %in% lag_date_set)
+        monitor_exposure <- InverseWeightedAvg(monitor_exposure)
+        monitor_exposure$lon <- patient.df$Longitude[i]
+        monitor_exposure$lat <- patient.df$Latitude[i]
+        monitor_exposure$person <- i
+        monitor_exposure$o3 <- monitor_exposure$armean*1000
+        monitor_exposure$armean <- NA
+      }
+      
+      
+      temp_exposure <- GrabAT(temp_brick, hum_brick,lon_list_temp,lat_list_temp,
+                              patient.df$Longitude[i],patient.df$Latitude[i],year)
+      temp_exposure <- filter(temp_exposure, day %in% lag_date_set)
+    
+      environmental_exp_working <- dplyr::select(monitor_exposure,Date,armean,o3,person)
+      environmental_exp_working$temp <- temp_exposure$heat
+      environmental_exp_working$event <- rep(event_set,each = max_lag + 1)
+      environmental_exp_working$lag <- rep(c(max_lag:0),length(date_set))
+      environmental_exp_working$week <- rep(c(1:length(event_set)),each = max_lag+1)
+      
+      
+      patient_exposure <- rbind(patient_exposure,environmental_exp_working)
+    }
+  }
+  
+  return(patient_exposure)
+}
+
+PrintIndividual <- function(individual, environmental_exp,person_list,year){
+
+
+  environmental_exp_filt <- filter(environmental_exp, person == person_list[individual])
+  
+  environmental_exp_filt <- environmental_exp_filt %>% 
+    mutate(Date = Date) %>%
+    complete(Date = seq(min(environmental_exp_filt$Date),max(environmental_exp_filt$Date), by = "day"))
+  
+  p <- ggplot() +
+    geom_line(data=environmental_exp_filt, aes(x=Date, y=temp)) +
+    # scale_x_date(date_breaks = "d", date_labels =  "%d") +
+    # theme(axis.text.x=element_text(angle=60, hjust=1)) +
+    labs(x = "Month", y = "Apparent Temp (C)", title = paste0("Daily AT Highs in ",year))
+  
+  
+  g <- ggplot() +
+    geom_line(data=environmental_exp_filt, aes(x=Date, y=armean)) + 
+    # theme(axis.text.x=element_text(angle=60, hjust=1)) +
+    labs(x = "Month", y = "Arithmetic Mean PM2.5 (µg/m³)", title = paste0("Arithmetic Mean PM2.5 (µg/m³) in ",year))
+  
+  g2 <- ggplot() +
+    geom_line(data=environmental_exp_filt, aes(x=Date, y=o3)) + 
+    # theme(axis.text.x=element_text(angle=60, hjust=1)) +
+    labs(x = "Month", y = "Arithmetic Mean Ozone", title = paste0("Max Daily 8hr Mean Ozone ",year))
+  
+  m <- ggplot() + 
+    geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
+    geom_sf(data = metro, fill = NA, color = "red") + 
+    geom_sf(data = random_points[person_list[individual]], color = "forestgreen", size = 3) + 
+    theme_void()
+  
+  return(grid.arrange(p,m,g,g2,ncol = 2))
+  
+}
+
+# pm_data <- pm_frm_nfrm.df
+# o3_data <- o3_combined.df
+# radius <- 20
+# lag1 <- 1
+# lag2 <- 3
+# lag3 <- 0
+GetPMDates <- function(pm_data,o3_data, temp_brick,hum_brick,
+                       lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
+                       radius,rcoord,year,
+                       lag1,lag2,lag3){
+  rdates <- c()
+  for (i in 1:dim(rcoord)[1]){
+    lon <- rcoord[i,1]
+    lat <- rcoord[i,2]
+    working_pm <- GetAP(pm_data, lon_list_ap, lat_list_ap, lon, lat, F, radius)
+    working_o3 <- GetAP(o3_combined.df, lon_list_o3,lat_list_o3, lon, lat,F,radius)
+    working_temp <- GrabAT(temp_brick, hum_brick,lon_list_temp,lat_list_temp,lon,lat,year)
+    
+    
+    if (!is.na(working_pm[[1]][[1]])){
+      working_pm <- filter(working_pm,Date > as.Date("2018-12-31"))
+      rdate1 <- working_pm$Date[sample(sort(working_pm$armean, 
+                                           index.return=TRUE, 
+                                           decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag1
+      if(rdate1 > "2019-12-31"){rdate1 <- NA}
+    } else {rdate1 <- NA}
+    
+    if (!is.na(working_o3[[1]][[1]])){
+      working_o3 <- filter(working_o3,Date > as.Date("2018-12-31"))
+      rdate2 <- working_o3$Date[sample(sort(working_o3$armean, 
+                                           index.return=TRUE, 
+                                           decreasing=TRUE,na.last = T)$ix[1:10],1)] + lag2
+      if(rdate2 > "2019-12-31"){rdate2 <- NA}
+    } else {rdate2 <- NA}
+    
+    working_temp <- filter(working_temp,day > as.Date("2018-12-31"))
+    rdate3 <- working_temp$day[sample(sort(working_temp$heat,
+                                           index.return=TRUE,
+                                           decreasing=TRUE,na.last = T)$ix[1:20],1)] + lag3
+    
+    
+    
+    if(rdate3 > "2019-12-31"){rdate3 <- NA}
+    
+    if (!is.na(rdate1) & !is.na(rdate2)){
+      rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
+    } else if (!is.na(rdate1) | !is.na(rdate2)){
+      rdate <- sample(na.omit(c(rdate1,rdate2,rdate3)),1)
+    } else {
+      rdate <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), 1)
+    }
+    
+    rdates <- c(rdates, rdate)
+  }
+  return(as.Date(rdates))
+}
+
+ImputedDensity <- function(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,lag,missing_only,x_hi,y_hi){
+  x <- unlist(patient_exposure_test_full[,lag],use.names = F)[pat_exp_bool[,lag]]
+  y <- unlist(patient_exposure_test_med[,lag],use.names = F)[pat_exp_bool[,lag]]
+  
+  if (lag == 1){
+    lag_to_print <- 4
+  } else if (lag == 2){
+    lag_to_print <- 3
+  } else if (lag == 3){
+    lag_to_print <- 2
+  } else if (lag == 4){
+    lag_to_print <- 1
+  } else if (lag == 5){
+    lag_to_print <- 1
+  }
+  
+  if (missing_only){
+    missing_only <- "Missing Only"
+  } else {
+    missing_only <- ""
+  }
+  
+  plot(density(y),
+       main = paste0("Original vs Imputed Density for ", missing_only ," Armean ",lag_to_print),
+       xlim = c(0,x_hi),
+       ylim = c(0,y_hi))
+  lines(density(x), col = 2)
+  legend("topright", legend=c("Imputed","Original"), fill=1:2)
+}
+
+ImputedBox <- function(pat_exp_resid,lag){
+  if (lag == 1){
+    lag_to_print <- 4
+  } else if (lag == 2){
+    lag_to_print <- 3
+  } else if (lag == 3){
+    lag_to_print <- 2
+  } else if (lag == 4){
+    lag_to_print <- 1
+  } else if (lag == 5){
+    lag_to_print <- 1
+  }
+  
+  x <- pat_exp_resid[,lag]
+  x <- x[x != 0]
+  boxplot(x, main = paste0("Boxplot of (Obs-Imp)/Imp for Armean ",lag_to_print))
+}
+
+ReturnHumBrick <- function(year,lon_list_temp,lat_list_temp){
+  file_name <- paste0("hum_array_",year,".rda")
+  hum_array <- loadRData(file_name)
+  
+  hum_brick <- brick(hum_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  rm(hum_array)
+  hum_brick <- t(hum_brick)
+  gc()
+  return(hum_brick)
+}
+
+ReturnTempBrick <- function(year,lon_list_temp,lat_list_temp){
+  file_name <- paste0("temp_array_",year,".rda")
+  temp_array <- loadRData(file_name)
+  
+  temp_brick <- brick(temp_array, xmn=min(lat_list_temp), xmx=max(lat_list_temp),
+                   ymn=min(lon_list_temp), ymx=max(lon_list_temp),
+                   crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  rm(temp_array)
+  temp_brick <- t(temp_brick)
+  gc()
+  return(temp_brick)
+}
+
+
+```
+
+```{r}
+census <- read.xlsx("CensusList.xlsx")
+CBSA_census_list <- unique(census$CBSA.Title)
+
+city_list <- c("New York","Los Angeles","Chicago","Dallas","Houston","Washington-Arlington",
+               "Miami-Fort","Philadelphia-Camden","Atlanta","Phoenix","Boston","San Francisco",
+               "Riverside-San","Detroit","Seattle","Minneapolis","San Diego",
+               "Tampa","Denver","St. Louis","Baltimore","Charlotte-Concord","Orlando",
+               "San Antonio","Portland-Vancouver")
+
+ind_collection <- c()
+for (city_name in city_list){
+  ind <- which(lapply(CBSA_census_list, function(x) grep(city_name, x)) == 1)
+  ind_collection <- c(ind_collection, ind)
+}
+
+census <- dplyr::select(filter(census,CBSA.Title %in% CBSA_census_list[ind_collection]),"County/County.Equivalent","State.Name")
+
+countystate <- paste(census[,1],census[,2])
+```
+
+```{r}
+
+o3_2016 <- read.csv("Datasets/daily_44201_2016.csv")
+o3_2017 <- read.csv("Datasets/daily_44201_2017.csv")
+o3_2018 <- read.csv("Datasets/daily_44201_2018.csv")
+o3_2019 <- read.csv("Datasets/daily_44201_2019.csv")
+
+pm_2016 <- read.csv("Datasets/daily_88101_2016.csv")
+pm_2017 <- read.csv("Datasets/daily_88101_2017.csv")
+pm_2018 <- read.csv("Datasets/daily_88101_2018.csv")
+pm_2019 <- read.csv("Datasets/daily_88101_2019.csv")
+
+pm_2016_2 <- read.csv("Datasets/daily_88502_2016.csv")
+pm_2017_2 <- read.csv("Datasets/daily_88502_2017.csv")
+pm_2018_2 <- read.csv("Datasets/daily_88502_2018.csv")
+pm_2019_2 <- read.csv("Datasets/daily_88502_2019.csv")
+
+pm_combined <- rbind(pm_2016,pm_2017,pm_2018,pm_2019)
+pm2_combined <- rbind(pm_2016_2,pm_2017_2,pm_2018_2,pm_2019_2)
+o3_combined <- rbind(o3_2016,o3_2017,o3_2018,o3_2019)
+
+o3_combined.df <- CleanCombinedData(o3_combined,countystate)
+pm_combined.df <- CleanCombinedData(pm_combined, countystate)
+pm2_combined.df <- CleanCombinedData(pm2_combined,countystate)
+colnames(pm2_combined.df)[4] <- "armean2"
+
+pm_frm_nfrm.df <- full_join(pm_combined.df,pm2_combined.df,by=c("Latitude","Longitude","Date"))
+armean <- rowMeans(pm_frm_nfrm.df[,c(4,5)],na.rm = T)
+pm_frm_nfrm.df$armean <- armean
+pm_frm_nfrm.df <- pm_frm_nfrm.df[,c(1:4)]
+pm_frm.df <- pm_combined.df
+
+rm(pm_combined.df)
+rm(pm2_combined.df)
+
+rm(pm_2016)
+rm(pm_2017)
+rm(pm_2018)
+rm(pm_2019)
+
+rm(pm_2016_2)
+rm(pm_2017_2)
+rm(pm_2018_2)
+rm(pm_2019_2)
+
+rm(o3_2016)
+rm(o3_2017)
+rm(o3_2018)
+rm(o3_2019)
+
+rm(census)
+
+rm(o3_combined)
+rm(pm_combined)
+rm(pm2_combined)
+
+lon_list_ap <- unique(pm_frm.df$Longitude)
+lat_list_ap <- unique(pm_frm.df$Latitude)
+
+lon_list2_ap <- unique(pm_frm_nfrm.df$Longitude)
+lat_list2_ap <- unique(pm_frm_nfrm.df$Latitude)
+
+lon_list_o3 <- unique(o3_combined.df$Longitude)
+lat_list_o3 <- unique(o3_combined.df$Latitude)
+
+```
+
+```{r}
+library(ncdf4) # package for netcdf manipulation
+library(raster) # package for raster manipulation
+library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+library(weathermetrics) #rhum to dew
+library(abind)
+
+### Saving all AT arrays
+### combine last 10 days from previous year
+### When going thru patients we can now look at years individually
+
+# temp_array_2016 <- GetTempArray("2016")
+# hum_array_2016 <- GetHumArray("2016")
+# temp_array_end_2016 <- temp_array_2016[,,357:366]
+# hum_array_end_2016 <- hum_array_2016[,,357:366]
+# save(temp_array_2016, file = "temp_array_2016.rda")
+# save(hum_array_2016, file = "hum_array_2016.rda")
+# rm(temp_array_2016)
+# rm(hum_array_2016)
+# gc()
+# # 
+# temp_array_2017 <- GetTempArray("2017")
+# hum_array_2017 <- GetHumArray("2017")
+# temp_array_end_2017 <- temp_array_2017[,,356:365]
+# hum_array_end_2017 <- hum_array_2017[,,356:365]
+# temp_array_2017 <- abind(temp_array_end_2016,temp_array_2017,along = 3)
+# hum_array_2017 <- abind(hum_array_end_2016,hum_array_2017,along = 3)
+# save(temp_array_2017, file = "temp_array_2017.rda")
+# save(hum_array_2017, file = "hum_array_2017.rda")
+# rm(temp_array_2017)
+# rm(hum_array_2017)
+# gc()
+# # 
+# temp_array_2018 <- GetTempArray("2018")
+# hum_array_2018 <- GetHumArray("2018")
+# temp_array_end_2018 <- temp_array_2018[,,356:365]
+# hum_array_end_2018 <- hum_array_2018[,,356:365]
+# temp_array_2018 <- abind(temp_array_end_2017,temp_array_2018,along = 3)
+# hum_array_2018 <- abind(hum_array_end_2017,hum_array_2018,along = 3)
+# save(temp_array_2018, file = "temp_array_2018.rda")
+# save(hum_array_2018, file = "hum_array_2018.rda")
+# rm(temp_array_2018)
+# rm(hum_array_2018)
+# gc()
+# # 
+# temp_array_2019 <- GetTempArray("2019")
+# hum_array_2019 <- GetHumArray("2019")
+# temp_array_2019 <- abind(temp_array_end_2018,temp_array_2019,along = 3)
+# hum_array_2019 <- abind(hum_array_end_2018,hum_array_2019,along = 3)
+# save(temp_array_2019, file = "temp_array_2019.rda")
+# save(hum_array_2019, file = "hum_array_2019.rda")
+# rm(temp_array_2019)
+# rm(hum_array_2019)
+# gc()
+```
+
+```{r}
+year <- 2019
+templatlon <- GetTempLatLon(year)
+lon_list_temp <- templatlon[[1]]
+lat_list_temp <- templatlon[[2]]
+rm(templatlon)
+
+gc()
+
+hum_brick <- ReturnHumBrick(2019,lon_list_temp,lat_list_temp)
+gc()
+
+temp_brick <- ReturnTempBrick(2019,lon_list_temp,lat_list_temp)
+gc()
+```
+
+```{r}
+gc()
+
+spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles",1000)
+
+metro_tracts_within <- spatial_metro_list[[1]]
+metro <- spatial_metro_list[[2]]
+random_points <- spatial_metro_list[[3]]
+
+random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
+rcoord <- st_coordinates(random_points_latlon)
+# rdates <- sample(seq(as.Date('2016/01/11'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
+# rdates <- sample(seq(as.Date('2019/01/01'), as.Date('2019/12/31'), by="day"), dim(rcoord)[1])
+
+rdates <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick,hum_brick,
+                     lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp, 
+                     20,rcoord,year,
+                     2,4,0)
+
+patient.df <- data.frame(Longitude = rcoord[,1],
+                         Latitude = rcoord[,2],
+                         Date = rdates)
+
+patient_2016.df <- filter(patient.df,Date >= "2016-01-01" & Date < "2017-01-01")
+patient_2017.df <- filter(patient.df,Date >= "2017-01-01" & Date < "2018-01-01")
+patient_2018.df <- filter(patient.df,Date >= "2018-01-01" & Date < "2019-01-01")
+patient_2019.df <- filter(patient.df,Date >= "2019-01-01" & Date < "2020-01-01")
+
+
+patient.df <- patient_2019.df
+
+```
+
+
+
+```{r}
+
+
+patient_exposure_2019 <- GetExposureData(patient.df,pm_frm_nfrm.df,o3_combined.df,lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,temp_brick,hum_brick,year)
+
+
+person_list <- unique(patient_exposure_2019$person)
+event_dates <- patient.df$Date[person_list]
+
+ggplot() + 
+  geom_sf(data = metro_tracts_within, fill = "white", color = "grey") + 
+  geom_sf(data = metro, fill = NA, color = "red") + 
+  geom_sf(data = random_points, color = "red") + 
+  geom_sf(data = random_points[person_list], color = "blue") + 
+  theme_void()
+
+```
+
+
+
+
+```{r}
+library(gridExtra)
+PrintIndividual(3,patient_exposure_2019,person_list,2019)
+PrintIndividual(30,patient_exposure_2019,person_list,2019)
+```
+
+```{r}
+#2 day lag for pm2.5
+#4 day lag for o3
+#0 day lag for temp
+library(survival)
+library(mice)
+library(VIM)
+patient_exposure_wide <- pivot_wider(patient_exposure_2019,
+                 id_cols = c(person,event,week),names_from = lag,values_from = c(armean,temp,o3))
+
+
+#View(md.pattern(patient_exposure_wide))
+# aggr_plot <- aggr(patient_exposure_wide, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(patient_exposure_wide), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+# aggr_plot
+
+#Impute missing data with MICE
+imputed_patient_exposure <- mice(patient_exposure_wide,m=5,maxit=50,meth='pmm',seed=500)
+
+model1 <- clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
+                 temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
+                 o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
+                 strata(person), patient_exposure_wide)
+summary(model1)
+
+#conditional logistic regression with MICE imputed data 
+model2 <- with(imputed_patient_exposure,clogit(event ~ armean_4 + armean_3 + armean_2 + armean_1 + armean_0 +
+                 temp_4 + temp_3 + temp_2 + temp_1 + temp_0 + 
+                 o3_4 + o3_3 + o3_2 + o3_1 + o3_0 + 
+                 strata(person)))
+summary(pool(model2))
+```
+
+```{r, include=FALSE}
+#MICE Sanity check
+#Get complete true data
+#Remove some of those values
+#Impute the missing data
+#Compare imputed data with true data
+
+patient_exposure_test_full <- na.omit(patient_exposure_wide)
+patient_exposure_test <- na.omit(patient_exposure_wide)
+for (i in 1:dim(patient_exposure_test)[1]){
+  if (rbinom(1,1,.2) == 1){
+    if (i %% 3 == 0){
+      patient_exposure_test$armean_4[i] <- NA
+      patient_exposure_test$armean_2[i] <- NA
+      patient_exposure_test$armean_1[i] <- NA
+    } else if (i %%3 == 1){
+      patient_exposure_test$armean_4[i] <- NA
+      patient_exposure_test$armean_3[i] <- NA
+      patient_exposure_test$armean_1[i] <- NA
+      patient_exposure_test$armean_0[i] <- NA
+    } else {
+      patient_exposure_test$armean_3[i] <- NA
+      patient_exposure_test$armean_2[i] <- NA
+      patient_exposure_test$armean_0[i] <- NA
+    }
+  }
+}
+
+patient_exposure_test_imp <- mice(patient_exposure_test,m=5,maxit=50,meth='pmm',seed=500)
+patient_exposure_test_imp1 <- complete(patient_exposure_test_imp,1)
+patient_exposure_test_imp2 <- complete(patient_exposure_test_imp,2)
+patient_exposure_test_imp3 <- complete(patient_exposure_test_imp,3)
+patient_exposure_test_imp4 <- complete(patient_exposure_test_imp,4)
+patient_exposure_test_imp5 <- complete(patient_exposure_test_imp,5)
+
+patient_exposure_test_med <- patient_exposure_test_imp1
+for (i in 1:dim(patient_exposure_test_imp1)[1]){
+  for (j in 1:dim(patient_exposure_test_imp1)[2]){
+    patient_exposure_test_med[i,j] <- median(c(patient_exposure_test_imp1[i,j],
+                                               patient_exposure_test_imp2[i,j],
+                                               patient_exposure_test_imp3[i,j],
+                                               patient_exposure_test_imp4[i,j],
+                                               patient_exposure_test_imp5[i,j]))
+  }
+}
+
+patient_exposure_test_med <- dplyr::select(patient_exposure_test_med,c(armean_4,armean_3,armean_2,armean_1,armean_0))
+
+patient_exposure_test_full <- dplyr::select(patient_exposure_test_full,c(armean_4,armean_3,armean_2,armean_1,armean_0))
+
+
+pat_exp_resid <- (patient_exposure_test_full - patient_exposure_test_med)/patient_exposure_test_med
+pat_exp_bool <- pat_exp_resid != 0
+true_mat <- matrix(T,2227,5)
+#Density plot of ONLY removed values
+par(mfrow=c(2,1))
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,1,T,40,.12)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,true_mat,1,F,40,.12)
+
+par(mfrow=c(2,1))
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,2,T,40,.12)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,true_mat,2,F,40,.12)
+
+par(mfrow=c(2,1))
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,3,T,40,.12)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,true_mat,3,F,40,.12)
+
+par(mfrow=c(2,1))
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,4,T,40,.12)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,true_mat,4,F,40,.12)
+
+par(mfrow=c(2,1))
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,pat_exp_bool,5,T,40,.12)
+ImputedDensity(patient_exposure_test_full,patient_exposure_test_med,true_mat,5,F,40,.12)
+
+
+par(mfrow=c(1,1))
+#Boxplot of ONLY removed values
+ImputedBox(pat_exp_resid,1)
+ImputedBox(pat_exp_resid,2)
+ImputedBox(pat_exp_resid,3)
+ImputedBox(pat_exp_resid,4)
+ImputedBox(pat_exp_resid,5)
+  
+```
