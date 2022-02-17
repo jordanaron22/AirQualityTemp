@@ -1,5 +1,5 @@
 ---
-title: "Mice Sanity Check"
+title: "Exposure Simulation"
 output:
   html_document:
     df_print: paged
@@ -35,6 +35,8 @@ library(ggplot2) # package for plotting
 library(weathermetrics) #rhum to dew
 library(abind)
 
+memory.limit(size=20000)
+
 set.seed(10)
 
 `%!in%` <- Negate(`%in%`)
@@ -56,14 +58,20 @@ CleanCombinedData <- function(pm_combined,countystate){
   
   unique(pm_combined_clean$combined_county_state)[unique(pm_combined_clean$combined_county_state) %!in% countystate]
   
-  lon_list_ap <- unique(pm_combined_clean$Longitude)
-  lat_list_ap <- unique(pm_combined_clean$Latitude)
+  #Longitude duplicate
+  #Latitude differs by e-6
+  lon_lat_list <- unique(dplyr::select(pm_combined_clean,Longitude,Latitude))
+  
+  lon_list_ap <- lon_lat_list[,1]
+  lat_list_ap <- lon_lat_list[,2]
   samdur_list <- unique(pm_combined_clean$Sample.Duration)
   
   pm_combined.df <- data.frame()
-  date_list <- seq.Date(as.Date("2016-01-01"),as.Date("2019-12-31"),"day")
+  date_list <- seq.Date(as.Date("2015-12-22"),as.Date("2019-12-31"),"day")
   
   for (lat_ind in 1:length(lat_list_ap)){
+    
+    
     working_pm_combined <- filter(pm_combined_clean,Latitude == lat_list_ap[lat_ind])
     
     method1 <- filter(working_pm_combined,Sample.Duration == samdur_list[1])
@@ -123,6 +131,13 @@ GetMonitorPM <- function(lon_list_ap,lat_list_ap,lon,lat, return_mult, radius){
   }
 }
 
+# pm_data <- o3_combined.df
+# lon <-  patient.df$Longitude[i]
+# lat <-  patient.df$Latitude[i]
+# lon_list_ap <- lon_list_o3
+# lat_list_ap <- lat_list_o3
+# return_mult <- T
+# radius <- 20
 GetAP <- function(pm_data, lon_list_ap, lat_list_ap, lon, lat, return_mult, radius){
 
   lonlat <- GetMonitorPM(lon_list_ap,lat_list_ap, lon,lat,return_mult,radius)
@@ -196,7 +211,7 @@ GrabAT <- function(temp_brick,hum_brick, lon_list_temp, lat_list_temp, lon, lat,
 
 SimulateMetroData <- function(States,City,samp_size){
 
-  metro_tracts <- map_dfr(States,progress_bar=F, ~{
+  metro_tracts <- map_dfr(States, ~{
     tracts(.x, cb = TRUE, year = 2020)
   }) %>%
     st_transform(8528)
@@ -324,9 +339,12 @@ GetTimeStratDays <- function(patient_date){
 
 
 # pm_combined.df <- pm_frm_nfrm.df
-# year <- 2019
+# year <- 2016
 # lon_list_ap <- lon_list2_ap
 # lat_list_ap <- lat_list2_ap
+# patient.df <- patient_2016.df
+# temp_brick <- temp_brick_2016
+# hum_brick <- hum_brick_2016
 
 GetExposureData <- function(patient.df,pm_combined.df,o3_combined.df,lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3, temp_brick,hum_brick,year){
   
@@ -589,24 +607,33 @@ countystate <- paste(census[,1],census[,2])
 
 ```{r}
 
+o3_2015 <- read.csv("Datasets/daily_44201_2015.csv")
+o3_2015 <- filter(o3_2015, Date.Local > as.Date("2015-12-21"))
 o3_2016 <- read.csv("Datasets/daily_44201_2016.csv")
 o3_2017 <- read.csv("Datasets/daily_44201_2017.csv")
 o3_2018 <- read.csv("Datasets/daily_44201_2018.csv")
 o3_2019 <- read.csv("Datasets/daily_44201_2019.csv")
 
+pm_2015 <- read.csv("Datasets/daily_88101_2015.csv")
+pm_2015 <- filter(pm_2015, Date.Local > as.Date("2015-12-21"))
 pm_2016 <- read.csv("Datasets/daily_88101_2016.csv")
 pm_2017 <- read.csv("Datasets/daily_88101_2017.csv")
 pm_2018 <- read.csv("Datasets/daily_88101_2018.csv")
 pm_2019 <- read.csv("Datasets/daily_88101_2019.csv")
 
+pm_2015_2 <- read.csv("Datasets/daily_88502_2015.csv")
+pm_2015_2 <- filter(pm_2015_2, Date.Local > as.Date("2015-12-21"))
 pm_2016_2 <- read.csv("Datasets/daily_88502_2016.csv")
 pm_2017_2 <- read.csv("Datasets/daily_88502_2017.csv")
 pm_2018_2 <- read.csv("Datasets/daily_88502_2018.csv")
 pm_2019_2 <- read.csv("Datasets/daily_88502_2019.csv")
 
-pm_combined <- rbind(pm_2016,pm_2017,pm_2018,pm_2019)
-pm2_combined <- rbind(pm_2016_2,pm_2017_2,pm_2018_2,pm_2019_2)
-o3_combined <- rbind(o3_2016,o3_2017,o3_2018,o3_2019)
+pm_combined <- rbind(pm_2015,pm_2016,pm_2017,pm_2018,pm_2019)
+pm2_combined <- rbind(pm_2015_2,pm_2016_2,pm_2017_2,pm_2018_2,pm_2019_2)
+o3_combined <- rbind(o3_2015,o3_2016,o3_2017,o3_2018,o3_2019)
+```
+
+```{r}
 
 o3_combined.df <- CleanCombinedData(o3_combined,countystate)
 pm_combined.df <- CleanCombinedData(pm_combined, countystate)
@@ -643,18 +670,20 @@ rm(o3_combined)
 rm(pm_combined)
 rm(pm2_combined)
 
-lon_list_ap <- unique(pm_frm.df$Longitude)
-lat_list_ap <- unique(pm_frm.df$Latitude)
+lon_lat_list <- unique(dplyr::select(pm_frm.df,Longitude, Latitude))
+lon_list_ap <- lon_lat_list[,1]
+lat_list_ap <- lon_lat_list[,2]
 
-lon_list2_ap <- unique(pm_frm_nfrm.df$Longitude)
-lat_list2_ap <- unique(pm_frm_nfrm.df$Latitude)
+lon_lat_list2 <- unique(dplyr::select(pm_frm_nfrm.df,Longitude, Latitude))
+lon_list2_ap <- lon_lat_list[,1]
+lat_list2_ap <- lon_lat_list[,2]
 
 lon_list_o3 <- unique(o3_combined.df$Longitude)
 lat_list_o3 <- unique(o3_combined.df$Latitude)
 
 ```
 
-```{r}
+```{r, include = F}
 ### Saving all AT arrays
 ### combine last 10 days from previous year
 ### When going thru patients we can now look at years individually
@@ -713,8 +742,8 @@ lat_list_o3 <- unique(o3_combined.df$Latitude)
 # gc()
 ```
 
-```{r, include=FALSE}
-templatlon <- GetTempLatLon(year)
+```{r}
+templatlon <- GetTempLatLon(2019)
 lon_list_temp <- templatlon[[1]]
 lat_list_temp <- templatlon[[2]]
 rm(templatlon)
@@ -732,16 +761,31 @@ gc()
 
 temp_brick_2018 <- ReturnTempBrick(2018,lon_list_temp,lat_list_temp)
 gc()
+
+hum_brick_2017 <- ReturnHumBrick(2017,lon_list_temp,lat_list_temp)
+gc()
+
+temp_brick_2017 <- ReturnTempBrick(2017,lon_list_temp,lat_list_temp)
+gc()
+
+hum_brick_2016 <- ReturnHumBrick(2016,lon_list_temp,lat_list_temp)
+gc()
+
+temp_brick_2016 <- ReturnTempBrick(2016,lon_list_temp,lat_list_temp)
+gc()
 ```
  
 ###### Simulate Data
 
 
-```{r, message = FALSE}
+```{r, include = F}
 gc()
 
 spatial_metro_list <- SimulateMetroData(c("CA"),"Los Angeles",1000)
+```
 
+
+```{r}
 metro_tracts_within <- spatial_metro_list[[1]]
 metro <- spatial_metro_list[[2]]
 random_points <- spatial_metro_list[[3]]
@@ -749,17 +793,26 @@ random_points <- spatial_metro_list[[3]]
 random_points_latlon <- st_transform(random_points, "+proj=longlat +datum=WGS84")
 rcoord <- st_coordinates(random_points_latlon)
 
-rdates_2019 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2019,hum_brick_2019,
+rdates_2016 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2016,hum_brick_2016,
                           lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
-                          20,rcoord[1:500,],2019,2,4,0)
+                          20,rcoord[1:250,],2016,2,4,0)
+
+rdates_2017 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2017,hum_brick_2017,
+                          lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
+                          20,rcoord[251:500,],2017,2,4,0)
 
 rdates_2018 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2018,hum_brick_2018,
                           lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
-                          20,rcoord[501:1000,],2018,2,4,0)
+                          20,rcoord[501:750,],2018,2,4,0)
+
+rdates_2019 <- GetPMDates(pm_frm_nfrm.df, o3_combined,temp_brick_2019,hum_brick_2019,
+                          lon_list_ap,lat_list_ap,lon_list_o3,lat_list_o3,lon_list_temp,lat_list_temp,
+                          20,rcoord[751:1000,],2019,2,4,0)
+
 
 patient.df <- data.frame(Longitude = rcoord[,1],
                          Latitude = rcoord[,2],
-                         Date = c(rdates_2019,rdates_2018))
+                         Date = c(rdates_2016,rdates_2017,rdates_2018,rdates_2019))
 
 patient_2016.df <- filter(patient.df,Date >= "2016-01-01" & Date < "2017-01-01")
 patient_2017.df <- filter(patient.df,Date >= "2017-01-01" & Date < "2018-01-01")
@@ -768,6 +821,7 @@ patient_2019.df <- filter(patient.df,Date >= "2019-01-01" & Date < "2020-01-01")
 
 
 ```
+
 ###### Analysis
 
 ```{r}
@@ -781,6 +835,20 @@ patient_exposure_2018 <- GetExposureData(patient_2018.df,pm_frm_nfrm.df,o3_combi
                                          lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,
                                          temp_brick_2018,hum_brick_2018,2018)
 
+patient_exposure_2017 <- GetExposureData(patient_2017.df,pm_frm_nfrm.df,o3_combined.df,
+                                         lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,
+                                         temp_brick_2017,hum_brick_2017,2017)
+
+patient_exposure_2016 <- GetExposureData(patient_2016.df,pm_frm_nfrm.df,o3_combined.df,
+                                         lon_list2_ap,lat_list2_ap,lon_list_o3,lat_list_o3,
+                                         temp_brick_2016,hum_brick_2016,2016)
+
+
+```
+
+
+```{r}
+library(gridExtra)
 
 person_list <- unique(patient_exposure_2019$person)
 event_dates <- patient.df$Date[person_list]
@@ -792,11 +860,7 @@ ggplot() +
   geom_sf(data = random_points[person_list], color = "blue") + 
   theme_void()
 
-```
 
-
-```{r}
-library(gridExtra)
 PrintIndividual(3,patient_exposure_2019,person_list,2019)
 PrintIndividual(30,patient_exposure_2019,person_list,2019)
 ```
@@ -809,9 +873,11 @@ library(survival)
 library(mice)
 library(VIM)
 
-patient_exposure_2018$person <- patient_exposure_2018$person + max(patient_exposure_2019$person)
+patient_exposure_2019$person <- patient_exposure_2019$person + 750
+patient_exposure_2018$person <- patient_exposure_2018$person + 500
+patient_exposure_2017$person <- patient_exposure_2017$person + 250
 
-patient_exposure <- rbind(patient_exposure_2019,patient_exposure_2018)
+patient_exposure <- rbind(patient_exposure_2016,patient_exposure_2017,patient_exposure_2018,patient_exposure_2019)
 
 patient_exposure_wide <- pivot_wider(patient_exposure,
                  id_cols = c(person,event,week),names_from = lag,values_from = c(armean,temp,o3))
