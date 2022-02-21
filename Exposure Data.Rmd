@@ -41,18 +41,14 @@ set.seed(10)
 
 `%!in%` <- Negate(`%in%`)
 
+pm_combined <- o3_combined
 CleanCombinedData <- function(pm_combined,countystate){
   
   pm_combined_clean <- pm_combined %>% filter(Observation.Percent >= 50) 
   
-  CBSA_list <- unique(pm_combined_clean$CBSA.Name)
-  CBSA_ind <- c(19,29,39,47,49,62,77,79,82,86,89,96,114,116,174,179,192,196,227,248,281,316,319,321,342)
-  
-  CBSA_list[CBSA_ind]
-  
   pm_combined_clean <- mutate(pm_combined_clean, combined_county_state = paste(County.Name, State.Name))
   
-  pm_combined_clean <- pm_combined_clean %>% filter((combined_county_state %in% countystate) | CBSA.Name %in% CBSA_list[CBSA_ind])
+  pm_combined_clean <- pm_combined_clean %>% filter((combined_county_state %in% countystate))
   
   pm_combined_clean <- subset(pm_combined_clean, Arithmetic.Mean >= 0 )
   
