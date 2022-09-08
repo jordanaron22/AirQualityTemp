@@ -1,0 +1,450 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(sf)
+library(sp)
+library(tmap)
+library(spdep)
+library(tigris)
+library(dplyr)
+library(tidyverse)
+library(tidycensus)
+library(prevR)
+library(rgdal)
+library(ggrepel)
+library(viridis)
+library(maps)
+library(tools)
+
+setwd("Plot Support/")
+load("pm_frm_nfrm.rda")
+
+lon_lat_list <- unique(dplyr::select(pm_frm_nfrm.df,Longitude, Latitude))
+lon_list_ap <- lon_lat_list[,1]
+lat_list_ap <- lon_lat_list[,2]
+
+#Need to run thius manually (control enter)
+shape <- readOGR(dsn = "tl_2019_us_cbsa", layer = "tl_2019_us_cbsa")
+cbsa_shape_name <- c("New York-Newark-Jersey City, NY-NJ-PA","Los Angeles-Long Beach-Anaheim, CA","Chicago-Naperville-Elgin, IL-IN-WI","Dallas-Fort Worth-Arlington, TX","Houston-The Woodlands-Sugar Land, TX","Washington-Arlington-Alexandria, DC-VA-MD-WV","Miami-Fort Lauderdale-Pompano Beach, FL","Philadelphia-Camden-Wilmington, PA-NJ-DE-MD","Atlanta-Sandy Springs-Alpharetta, GA","Phoenix-Mesa-Chandler, AZ","Boston-Cambridge-Newton, MA-NH","San Francisco-Oakland-Berkeley, CA","Riverside-San Bernardino-Ontario, CA","Detroit-Warren-Dearborn, MI","Seattle-Tacoma-Bellevue, WA","Minneapolis-St. Paul-Bloomington, MN-WI","San Diego-Chula Vista-Carlsbad, CA","Tampa-St. Petersburg-Clearwater, FL","Denver-Aurora-Lakewood, CO","St. Louis, MO-IL","Baltimore-Columbia-Towson, MD","Charlotte-Concord-Gastonia, NC-SC","Orlando-Kissimmee-Sanford, FL","San Antonio-New Braunfels, TX"  ,"Portland-Vancouver-Hillsboro, OR-WA")
+
+cbsa_shape_files <- shape[shape$NAME %in% cbsa_shape_name,]
+
+
+ne_shape <- shape[shape$NAME %in% cbsa_shape_name[c(1,6,8,11,21)] ,]
+
+ne_pm_ind <- point.in.SpatialPolygons(lon_list_ap,lat_list_ap,ne_shape)
+ne_pm_df <- data.frame(Longitude = lon_list_ap[ne_pm_ind],
+                       Latitude = lat_list_ap[ne_pm_ind])
+
+# st_us <- states() %>% filter(NAME != "United States Virgin Islands" & NAME != "Commonwealth of the Northern Mariana Islands" &
+#                             NAME != "Alaska" & NAME != "Guam" & NAME != "Puerto Rico" & NAME != "American Samoa" & NAME != "Hawaii")
+
+usa_albers <- CRS("+proj=aea +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-96 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs")
+
+states <- st_as_sf(map("state", plot = FALSE, fill = TRUE))
+# states <- cbind(states, st_coordinates(st_centroid(states)))
+states$ID <- toTitleCase(states$ID)
+
+
+pm_proj_df <- data.frame(lat = as.double(lat_list_ap),
+                            lng = as.double(lon_list_ap))
+pm_proj_df <- st_as_sf(pm_proj_df, coords = c("lng", "lat"), remove = FALSE, crs = 4326, agr = "constant")
+pm_proj_df <- st_transform(pm_proj_df,crs = usa_albers)
+pm_proj_df <- st_coordinates(pm_proj_df)
+
+cbsas_coord <- data.frame(lat = as.double(cbsa_shape_files$INTPTLAT),
+                    lng = as.double(cbsa_shape_files$INTPTLON))
+
+cbsas_coord <- st_as_sf(cbsas_coord, coords = c("lng", "lat"), remove = FALSE, crs = 4326, agr = "constant")
+cbsas_coord <- st_transform(cbsas_coord,crs = usa_albers)
+
+load("metro_counts_race_perc.rda")
+cbsas <- data.frame(name = sapply(strsplit(cbsa_shape_files$NAME,"-"),"[[",1),
+                    lat = as.double(cbsa_shape_files$INTPTLAT),
+                    lng = as.double(cbsa_shape_files$INTPTLON),
+                    fullname = cbsa_shape_files$NAME,
+                    perc = cut(metro_counts_race_perc$n, breaks = c(0,.16,.4,1), labels = c("<= .15", " > .15 and <= .4", " > .4")))
+
+cbsas$perc <- factor(cbsas$perc, levels = rev(levels(cbsas$perc)))
+
+cbsas <- cbind(cbsas,st_coordinates(cbsas_coord))
+
+load("metro_counts.rda")
+new_order <- match(cbsa_shape_files$NAME,metro_counts$metro)
+metro_counts <- metro_counts[new_order,]
+cbsa_shape_files$samplesize <- as.numeric(metro_counts$n)
+cbsa_shape_files <- st_as_sf(cbsa_shape_files)
+
+
+
+cbsa_shape_files <- st_transform(cbsa_shape_files, usa_albers)
+states <- st_transform(states, usa_albers)
+
+ne_shape_files <- st_transform(cbsa_shape_files, crs = 4326)[c(2,3,13,15,25),]
+ne_cbsas <- cbsas[c(2,3,13,15,25),]
+states_noproj <-  st_transform(states, crs = 4326)
+sf_use_s2(FALSE)
+```
+
+```{r, fig.width=15, fig.height=15}
+ggplot() +
+  geom_sf(data = states, fill = NA) +
+  geom_sf(data = cbsa_shape_files, aes(fill = samplesize)) + 
+  # geom_point(data = cbsas, aes(x = X, y = Y)) +
+  geom_label_repel(data = cbsas, aes(x = X, y = Y,label = name, col = perc), box.padding = 1)+
+  scale_fill_viridis(direction=-1,option = "inferno",name = "Sample Size") + 
+  scale_color_manual(values=c("#000004", "#781c6d","#ed6925"), name = "Percent Black",
+                     labels = c("Greater than 40%", "Between 15%-40%","Less Than 15%")) + 
+  theme_void() +
+  theme(legend.position="right", plot.title = element_text(size = 20, face = "bold"),
+        legend.text=element_text(size=14),
+        legend.title=element_text(size=14)) + 
+  ggtitle("Map of Largest 25 Metro Areas and PM2.5 Monitors with Sample Size and Percent Black") +
+  labs(x = "Longitude", y = "Latitude")+ 
+  geom_point(data = as.data.frame(pm_proj_df), aes(x = X , y = Y), col = "black", fill = "white", size = 1, shape = 21)
+
+ggsave("CBSAmapwithPM.png", width = 15, height = 7.5,bg="white", dpi = 400)
+  
+
+ggplot() +
+  geom_sf(data = states_noproj, fill = NA) +
+  geom_sf(data = ne_shape_files, aes(fill = samplesize), show.legend = T) + 
+  coord_sf(xlim = c(-78.75,-70), ylim = c(37.75, 44), expand = FALSE) +
+  geom_label_repel(data = ne_cbsas, aes(x = lng, y = lat, label = fullname, col = perc),
+                  nudge_x = c(1,-2,1.2,-1,0), nudge_y = c(-1.5,0,-1,1.9,1.6)) +
+  scale_fill_viridis(direction=-1,option = "inferno",name = "Sample Size",
+                     guide = guide_colorbar(order = 1)) + 
+  scale_color_manual(values=c("#000004", "#781c6d","#ed6925"), name = "Percent Black",
+                     labels = c("Greater than 40%", "Between 15%-40%","Less Than 15%")) + 
+  theme_void() +
+  theme(legend.position="right", plot.title = element_text(size = 30, face = "bold"),
+        legend.text=element_text(size=15),
+        legend.title=element_text(size=15)) + 
+  ggtitle("North East Metro Areas with PM2.5 Monitors") + 
+  geom_point(data = ne_pm_df, aes(x = Longitude , y = Latitude), col = "red", size = 2) 
+
+
+# ggsave("NEmap.png", width = 12.5, height = 10,bg="white")
+```
+
+
+```{r, fig.height=10,fig.width=10}
+library(forestploter)
+library(ggplot2)
+
+load("plotfilesDual.rda")
+dp_line <- plotfiles[[1]][1,]
+dp_line[1] <- "Dual Pollutant"
+load("plotfiles.rda")
+
+forest.df <- plotfiles[[1]][1:23,]
+
+forest.df <- rbind(forest.df[1,],dp_line,forest.df[2:22,])
+
+# forest.df[,3] <- as.numeric(forest.df[,3])
+# forest.df[,4] <- as.numeric(forest.df[,4])
+# forest.df[,5] <- as.numeric(forest.df[,5])
+# forest.df[,6] <- as.numeric(forest.df[,6])
+
+forest.df[,3:6] <- sapply(forest.df[,3:6], as.numeric)
+# 
+forest.df$Subgroup <- ifelse(forest.df$NEvent == "",
+                             forest.df$Subgroup,
+                             paste0("    ",forest.df$Subgroup))
+
+# forest.df[1,1] <- "All Patients"
+colnames(forest.df)[2] <- "N Event"
+forest_total <- forest(forest.df[,c(1,2,7,8)],
+       est = forest.df$est,
+       lower = forest.df$low,
+       upper = forest.df$hi,
+       sizes = forest.df$se,
+       ci_column = 3,
+       ref_lin = 1,
+       xlab = "Odds Ratio")
+
+
+
+print(forest_total)
+ggsave(filename = "ForestPlot.png", plot = forest_total, dpi = 300,
+                width = 7.5, height = 7)
+```
+
+```{r}
+# forest.df <- rbind(forest.df,c("Sensitivity Analysis for All Patients", rep("",7)))
+# 
+# load("plotfilesDual.rda")
+# colnames(plotfiles[[1]])[c(2)] <- c("N Event")
+# forest.df <- rbind(forest.df,plotfiles[[1]][1,])
+# forest.df[25,1] <- "Dual Pollutant"
+# load("plotfiles.rda")
+# 
+# poll_lag.df <- plotfiles[[4]]
+# poll_lag.df[,3:6] <- sapply(poll_lag.df[,3:6], as.numeric)
+# poll_lag.df[,1] <- c("Lag 0","Lag 1","Lag 2","Lag 3","Lag 4","Lag 5","Lag 6","Lag 0-3")
+# colnames(poll_lag.df)[c(1,2)] <- c("Subgroup", "N Event")
+# 
+# forest.df <- rbind(forest.df,poll_lag.df[2:8,])
+
+# forest_total <- add_underline(forest_total, row = 10)
+```
+
+```{r}
+
+forest.df <- plotfiles[[1]][c(24:35),]
+colnames(forest.df)[1] <- "CP Condition"
+
+# forest.df[,3] <- as.numeric(forest.df[,3])
+# forest.df[,4] <- as.numeric(forest.df[,4])
+# forest.df[,5] <- as.numeric(forest.df[,5])
+# forest.df[,6] <- as.numeric(forest.df[,6])
+
+forest.df[,3:6] <- sapply(forest.df[,3:6], as.numeric)
+# 
+forest.df$Subgroup <- ifelse(forest.df$NEvent == "",
+                             forest.df$Subgroup,
+                             paste0("    ",forest.df$Subgroup))
+
+# forest.df[1,1] <- "All Patients"
+colnames(forest.df)[2] <- "N Event"
+forest_total <- forest(forest.df[,c(1,2,7,8)],
+       est = forest.df$est,
+       lower = forest.df$low,
+       upper = forest.df$hi,
+       sizes = forest.df$se,
+       ci_column = 3,
+       ref_lin = 1,
+       xlab = "Odds Ratio")
+
+print(forest_total)
+ggsave(filename = "ForestPlotCPCond.png", plot = forest_total, dpi = 300,
+                width = 7.5, height = 3.75)
+```
+
+```{r, fig.height=10,fig.width=10}
+forest_group.df <- plotfiles[[2]]
+# forest_group.df[17,1] <- "CP Condition"
+
+forest_group.df$Subgroup <- ifelse(forest_group.df$NBlack == "",
+                             forest_group.df$Subgroup,
+                             paste0("    ",forest_group.df$Subgroup))
+
+colnames(forest_group.df)[c(2,3,13)] <- c("N Black", "N White", "P Value")
+
+tm <- forest_theme(base_size = 10,
+                   legend_name = "Race",
+                   legend_value = c("Black","White"))
+
+forest_race <- forest(forest_group.df[,c(1,2,3,12,13)],
+       est=list(forest_group.df$estb,
+                forest_group.df$estw),
+       lower=list(forest_group.df$lowb,
+                forest_group.df$loww),
+       upper=list(forest_group.df$hib,
+                forest_group.df$hiw),
+       ci_column = c(4),
+       ref_line = 1,
+       xlab = "Odds Ratio",
+       # ticks_at = c(.9, 1,1.1),
+       ticks_digits = 1,
+       theme = tm)
+
+forest_race
+
+ggsave(filename = "ForestPlotRace.png", plot = forest_race, dpi = 300,
+                width = 7.5, height = 7.5 )
+```
+
+```{r}
+library(tableone)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(tidyverse)
+
+tables <- plotfiles[[3]]
+
+# tab1 <- print(tables[[1]], showAllLevels = T, printToggle = FALSE, noSpaces = TRUE)
+# tab1_lat <- kbl(tab1, booktabs = T, format = "latex") %>%
+#   kable_styling(latex_options = c("scale_down")) 
+# 
+# tab1_lat <- str_replace_all(tab1_lat," \\(mean \\(SD\\)\\)", "")
+# tab1_lat <- str_replace_all(tab1_lat,">", "$>$")
+# tab1_lat <- str_replace_all(tab1_lat,"<=", "$\\\\leq$")
+# cat(tab1_lat)
+
+# tab2 <- print(tables[[2]], showAllLevels = T, printToggle = FALSE, noSpaces = TRUE)
+# tab2_lat <- kbl(tab2, booktabs = T, format = "latex") %>%
+#   kable_styling(latex_options = c("striped","scale_down")) 
+# 
+# tab2_lat <- str_replace_all(tab2_lat," \\(mean \\(SD\\)\\)", "")
+# tab2_lat <- str_replace_all(tab2_lat,">", "$>$")
+# tab2_lat <- str_replace_all(tab2_lat,"<=", "$\\\\leq$")
+# cat(tab2_lat)
+
+
+##Maybe combine first two columns to save space
+#Indent subgroups
+```
+
+```{r}
+# colnames(exp_tab1) <- c("Control", "Case")
+# 
+# exp_tab1 <- exp_tab1 %>% add_row("Control" = "", "Case" = "", .before = 2)
+# rownames(exp_tab1) <- c("Sample Size","PM2.5","Lag 0","Lag 0-3", "Lag 4-6", "NO2 Lag 0")
+# 
+# exp_tab1_lat <- kbl(exp_tab1, booktabs = T, format = "latex", linesep = "") %>% 
+#    kable_styling(latex_options = c("striped","HOLD_position")) %>% 
+#   add_indent(3:5)
+# 
+# cat(exp_tab1_lat)
+```
+
+```{r}
+tables <- plotfiles[[3]]
+
+exp_tab1 <- print(tables[[1]])
+exp_tab1 <- as.data.frame(exp_tab1)
+
+exp_tab2 <- print(tables[[2]])
+exp_tab2 <- as.data.frame(exp_tab2)
+
+exp_tab <- cbind(exp_tab1[,1],exp_tab2[,1:2],exp_tab1[,2],exp_tab2[,3:4])
+
+
+exp_tab <- exp_tab %>% add_row(.before = 2)
+exp_tab[2,] <- ""
+colnames(exp_tab) <- c("Overall","Black","White","Overall","Black","White")
+rownames(exp_tab) <- c("Sample Size","PM2.5","Lag 0","Lag 0-3", "Lag 4-6", "NO2 Lag 0")
+
+exp_tab2_lat <- kbl(exp_tab, booktabs = T, format = "latex",  linesep = "") %>% 
+  kable_styling(latex_options = c("striped","HOLD_position"), position = "center") %>% 
+  add_header_above(c("", "Control" = 3, "Case" = 3 )) %>% 
+  add_indent(3:5)
+
+exp_tab2_lat <- str_replace_all(exp_tab2_lat,"lllllll", "lcccccc")
+
+cat(exp_tab2_lat)
+```
+
+```{r}
+library(tidyverse)
+library(tableone)
+
+
+df1 <- print(tables[[3]])
+df1 <- as.data.frame(df1)
+
+df1 <- df1 %>% slice(c(1:8,16:34,9:15))
+
+df1 <- df1 %>% slice(-c(21))
+df1 <- df1 %>% slice(-c(16))
+
+# df1 <- df1 %>% add_row(Overall = "9065 (47.8)", .before = 9)
+# df1 <- df1 %>% add_row(Overall = "", .before = 9)
+df1 <- df1 %>% add_row(Overall = "2157 (17.5)", .before = 13)
+df1 <- df1 %>% add_row(Overall = "", .before = 13)
+df1 <- df1 %>% add_row(Overall = "4895 (25.6)", .before = 16)
+df1 <- df1 %>% add_row(Overall = "", .before = 16)
+
+
+rownames(df1) <- c("Sample Size",
+                   "Min Temperature","Min R Humidity", "Precipitation",
+                   "Gender (%)", "Female", "Male", "Transgender Female",
+                   "CCI","Zero","One to Four", "More Than Two",
+                   "Tobacco Status","Never","Current/Former",
+                   "Number of Cardiopulmonary Conditions","Zero ","One or More",
+                   "Age", "50-65 (%)", "65-80 (%)", "80-100 (%)",
+                   "ADI", "<=33 (%)","34-66 (%)", ">66 (%)",
+                   "Race (%)", "Black or African American","White","American Indian or Alaska Native","Asian","Native Hawaiian or Other Pacific Islander","Unknown/Declined")
+
+
+df2 <- print(tables[[4]])
+df2 <- as.data.frame(df2)
+df2 <- df2 %>% slice(-c(21))
+df2 <- df2 %>% slice(-c(16))
+
+colnames(df2) <- c("Black","White")
+
+df2 <- df2 %>% add_row(Black = "518 (17.7)", White = "1450 (17.3)", .before = 13)
+df2 <- df2 %>% add_row(Black = "", White = "", .before = 13)
+
+df2 <- df2 %>% add_row(Black = "852 (20.7)", White = "3493 (26.5)", .before = 16)
+df2 <- df2 %>% add_row(Black = "", White = "", .before = 16)
+
+df2 <- df2 %>% add_row(Black = "", White = "")
+df2 <- df2 %>% add_row(Black = "4143 (100)", White = "0 (0)")
+df2 <- df2 %>% add_row(Black = "0 (0)", White = "13233 (100)")
+df2 <- df2 %>% add_row(Black = "0 (0)", White = "0 (0)")
+df2 <- df2 %>% add_row(Black = "0 (0)", White = "0 (0)")
+df2 <- df2 %>% add_row(Black = "0 (0)", White = "0 (0)")
+df2 <- df2 %>% add_row(Black = "0 (0)", White = "0 (0)")
+
+
+rownames(df2) <- c("Sample Size",
+                   "Min Temperature","Min R Humidity", "Precipitation",
+                   "Gender (%)", "Female", "Male", "Transgender Female",
+                   "CCI","Zero","One to Four", "More Than Two",
+                   "Tobacco Status","Never","Current/Former",
+                   "Number of Cardiopulmonary Conditions","Zero ","One or More",
+                   "Age", "50-65 (%)", "65-80 (%)", "80-100 (%)",
+                   "ADI", "<=33 (%)","34-66 (%)", ">66 (%)",
+                    "Race (%)", "Black or African American","White","American Indian or Alaska Native","Asian","Native Hawaiian or Other Pacific Islander","Unknown/Declined")
+
+
+tab1 <- cbind(df1,df2)
+
+tab1_lat <- kbl(tab1, booktabs = T, format = "latex", linesep = "") %>%
+# kbl(df1, booktabs = T,  linesep = "") %>%
+  kable_styling(latex_options = c("HOLD_position","striped"), stripe_index = c(2,4,9:12,16:18,23:26)) %>%
+  add_indent(c(6:8)) %>%
+  add_indent(c(10:12)) %>%
+  add_indent(c(14:15)) %>%
+  add_indent(c(17:18)) %>%
+  add_indent(c(20:22)) %>%
+  add_indent(c(24:26)) %>%
+  add_indent(c(28:33))
+
+
+
+tab1_lat <- str_replace_all(tab1_lat," \\(mean \\(SD\\)\\)", "")
+tab1_lat <- str_replace_all(tab1_lat,">", "$>$")
+tab1_lat <- str_replace_all(tab1_lat,"<=", "$\\\\leq$")
+tab1_lat <- str_replace_all(tab1_lat,"\\( ", "\\(")
+cat(tab1_lat)
+```
+
+```{r, fig.height=10,fig.width=10}
+library(forestploter)
+library(ggplot2)
+poll_lag.df <- plotfiles[[4]]
+
+
+
+poll_lag.df[,3:6] <- sapply(poll_lag.df[,3:6], as.numeric)
+
+poll_lag.df[,1] <- c("Lag 0","Lag 1","Lag 2","Lag 3","Lag 4","Lag 5","Lag 6","Lag 0-3")
+
+
+colnames(poll_lag.df)[c(2)] <- c("N Event")
+
+forest_poll <- forest(poll_lag.df[,c(1,2,7,8)],
+       est = poll_lag.df$est,
+       lower = poll_lag.df$low,
+       upper = poll_lag.df$hi,
+       sizes = poll_lag.df$se,
+       ci_column = 3,
+       ref_lin = 1,
+       xlim = c(.95,1.1),
+      ticks_at = c(.95, 1,1.1),
+      ticks_digits = 2,
+       xlab = "Odds Ratio")
+
+forest_poll
+
+ggsave(filename = "ForestPlotPoll.png", plot = forest_poll, dpi = 300,
+                width = 7.5, height = 3.25)
+```
